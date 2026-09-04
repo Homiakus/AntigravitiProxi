@@ -28,6 +28,16 @@ type AgentTunnelOptions struct {
 }
 
 func DefaultAgentTunnelOptions() AgentTunnelOptions {
+	// Linux must actually bring ordinary local TCP/UDP connections through the
+	// TUN before process_name/process_path policy can be authoritative. With
+	// auto_redirect enabled, strict_route=false permits some host routes / bound
+	// sockets to bypass sing-box at the kernel layer. We deliberately enable
+	// strict routing on Linux and prove the negative invariant in CI: an
+	// unrelated process still exits through system-direct. Windows keeps the
+	// less intrusive default because strict_route can conflict with desktop
+	// networking/VM software there.
+	strictRoute := runtime.GOOS == "linux"
+
 	return AgentTunnelOptions{
 		ProcessNames: []string{
 			"Antigravity.exe",
@@ -59,7 +69,7 @@ func DefaultAgentTunnelOptions() AgentTunnelOptions {
 		TargetDomainSuffix: []string{
 			".googleapis.com",
 		},
-		StrictRoute:    false,
+		StrictRoute:    strictRoute,
 		DomainFallback: true,
 	}
 }
@@ -180,7 +190,7 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	}
 	// auto_detect_interface makes this outbound escape the TUN through the
 	// machine's original default route, preventing loops and preserving normal
-	// behavior for Fusion 360 and unrelated applications.
+	// behavior for unrelated applications.
 	systemDirect := map[string]any{
 		"type": "direct",
 		"tag":  "system-direct",
@@ -211,18 +221,18 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 		},
 	}
 	if runtime.GOOS == "linux" {
-		// Recommended by sing-box together with auto_route on Linux: nftables
-		// pre-routing improves performance and avoids Docker route conflicts.
+		// auto_redirect is the preferred Linux path. Combined with strict_route
+		// for Agent Tunnel it ensures policy is evaluated before a normal host
+		// default route can silently bypass process attribution.
 		tunInbound["auto_redirect"] = true
 	}
 
+	// Ordering is intentional. Since sing-box 1.14, routing rules also run in a
+	// pre-match phase for L3 inbounds. TCP sniffing always stops pre-match because
+	// no payload is available yet. Therefore process rules MUST precede sniff;
+	// otherwise every TCP flow can reach sniff before process attribution and the
+	// selective process policy is not authoritative.
 	routeRules := []any{
-		// Sniff TLS/HTTP/QUIC so an exact Antigravity destination can still be
-		// identified when a future helper binary changes its process name.
-		map[string]any{
-			"inbound": []string{agentTunnelTag},
-			"action":  "sniff",
-		},
 		// Keep the mixed port useful for HTTP/SOCKS diagnostics while TUN is on.
 		map[string]any{
 			"inbound":  []string{"local-mixed"},
@@ -240,6 +250,13 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 			"process_path_regex": options.ProcessPathRegex,
 			"action":             "route",
 			"outbound":           "vpn-direct",
+		},
+		// Only flows that were not already attributed by process reach sniff.
+		// Sniffing then enables the optional domain fallback for renamed/unknown
+		// helper processes.
+		map[string]any{
+			"inbound": []string{agentTunnelTag},
+			"action":  "sniff",
 		},
 	}
 	if options.DomainFallback {
