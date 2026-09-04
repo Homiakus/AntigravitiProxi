@@ -35,13 +35,19 @@
 
 - [ ] Platform elevation helper: Windows UAC / Linux pkexec/sudo only for privileged actions.
 - [ ] Windows privilege preflight before starting TUN; offer one-click elevated restart.
-- [ ] Linux capability preflight for `CAP_NET_ADMIN`/`CAP_NET_RAW` and nftables/nfqueue readiness.
-- [ ] Verify TUN interface creation and route ownership after startup, not only local mixed-port health.
-- [ ] Verify that `Antigravity.exe`, language server and bundled helpers actually egress through selected VPN.
+- [x] Linux TUN-device and `CAP_NET_ADMIN`/`CAP_NET_RAW` preflight with actionable `setcap` remediation.
+- [x] Linux selected VPN-interface existence/UP validation before TUN startup.
+- [x] Verify Linux TUN interface creation and cleanup with a real privileged runtime test in isolated `netns`.
+- [ ] Verify that Antigravity, language server and bundled helpers actually egress through selected VPN by PID/source path.
+- [x] Graceful Linux sing-box shutdown (`SIGTERM`) before forced fallback.
+- [x] Linux parent-death protection (`PDEATHSIG=SIGTERM`) to avoid orphan TUN/routes/nftables state.
+- [x] App shutdown hook waits for managed network helper cleanup.
+- [x] Linux elevated-launch guard: do not launch Antigravity as root; recover invoking desktop user when possible.
+- [x] Linux settings/executable discovery uses invoking desktop user rather than `/root` when elevated.
 - [ ] Automatic rollback watchdog if Agent Tunnel startup is partial or sing-box crashes.
 - [ ] Persist previous route/DNS state fingerprint for diagnostics and recovery verification.
-- [ ] Detect and recover stale `antigravity-tun` interface after unclean shutdown.
-- [ ] Managed sing-box lifecycle recovery after parent crash.
+- [ ] Detect and recover stale `antigravity-tun` interface after unclean shutdown that survives external failure modes.
+- [ ] Managed sing-box lifecycle recovery after reboot / externally orphaned process.
 - [ ] PID ownership verification before killing stale processes.
 - [ ] Health state machine: `idle → installing → starting → healthy/degraded → stopping`.
 - [ ] Separate health dimensions: `mixed_proxy`, `tun`, `dns`, `route`, `agent_process`, `backend`.
@@ -50,7 +56,8 @@
 - [ ] Structured JSON diagnostics export/download.
 - [ ] Redaction layer for IP/user paths before sharing diagnostics.
 - [ ] Automatic endpoint discovery from Antigravity language_server command line and logs.
-- [ ] Detect unsupported/changed sing-box schema and version compatibility.
+- [x] Generated Agent Tunnel config validated against pinned real sing-box in CI.
+- [ ] General schema compatibility layer for future sing-box versions.
 - [ ] Windows installer/MSIX or MSI.
 - [ ] Linux `.deb` and system desktop entry.
 - [ ] Code signing pipeline.
@@ -87,9 +94,11 @@
 - [ ] Integration tests with mock HTTP CONNECT/SOCKS server.
 - [ ] TUN config golden tests for Windows/Linux.
 - [ ] Windows runner integration test for route/process matching where runner permissions allow it.
-- [ ] Linux network namespace test fixture for TUN + nftables/auto_redirect.
-- [ ] Test that unrelated process traffic resolves/routs through `system-local/system-direct`.
-- [ ] Test that Antigravity process names and path regexes select `agent-vpn`.
+- [x] Linux network namespace runtime test fixture for real TUN + nftables/auto_redirect startup/health/cleanup.
+- [ ] Linux ARM64 privileged TUN runtime runner; current ARM64 coverage is build-only.
+- [ ] Distro runtime matrix (Ubuntu/Debian/Fedora family) for TUN/systemd-resolved/nftables interactions.
+- [ ] Test that unrelated process traffic resolves/routes through `local-dns/system-direct` at runtime.
+- [ ] Test that Antigravity process names and path regexes select `vpn-direct` at runtime.
 - [ ] Fuzz tests for archive extraction, settings editing and log redaction.
 - [ ] race detector in CI.
 - [ ] staticcheck/govulncheck.
