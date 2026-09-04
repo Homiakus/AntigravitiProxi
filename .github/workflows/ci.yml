@@ -51,8 +51,10 @@ jobs:
           chmod +x "$BIN"
           "$BIN" version
           echo "AGP_SINGBOX_BIN=$BIN" >> "$GITHUB_ENV"
-      - name: Build Linux runtime test binary
-        run: go test -c ./internal/proxy -o /tmp/antigraviti-proxi-proxy.test
+      - name: Build Linux runtime and deterministic egress probes
+        run: |
+          go test -c ./internal/proxy -o /tmp/antigraviti-proxi-proxy.test
+          go build -trimpath -o /tmp/agp-egress-probe ./cmd/egress-probe
       - name: Real TUN + PID/path-aware dual-egress isolation in netns
         shell: bash
         run: |
@@ -151,6 +153,7 @@ jobs:
             AGP_LINUX_TUN_SMOKE=1 \
             AGP_SINGBOX_BIN="$AGP_SINGBOX_BIN" \
             AGP_TEST_VPN_INTERFACE=vpn0 \
+            AGP_EGRESS_PROBE_BIN=/tmp/agp-egress-probe \
             AGP_EGRESS_PROBE_URL=http://203.0.113.10:18080/ \
             AGP_EXPECT_VPN_SOURCE=10.250.0.2 \
             AGP_EXPECT_SYSTEM_SOURCE=10.251.0.2 \
