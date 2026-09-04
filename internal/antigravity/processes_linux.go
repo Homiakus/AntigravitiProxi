@@ -73,6 +73,7 @@ func readLinuxProcess(pid int) (ProcessInfo, error) {
 			if part != "" {
 				clean = append(clean, part)
 			}
+		}
 		p.CommandLine = strings.Join(clean, " ")
 	}
 	return p, nil
