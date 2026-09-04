@@ -54,6 +54,7 @@ type Status struct {
 	AgentTunnelActive    bool                 `json:"agent_tunnel_active"`
 	AgentTunnelSupported bool                 `json:"agent_tunnel_supported"`
 	AgentTunnelHint      string               `json:"agent_tunnel_hint,omitempty"`
+	Health               proxy.HealthSnapshot `json:"health"`
 	Settings             Settings             `json:"settings"`
 	Interfaces           []platform.Interface `json:"interfaces"`
 }
@@ -69,6 +70,14 @@ func New() (*Server, error) {
 
 	settingsPath := filepath.Join(root, "config.json")
 	settings := loadSettings(settingsPath)
+	if runtime.GOOS == "linux" {
+		// Linux strict capture is an architecture invariant proven by the real
+		// dual-egress test, not a user preference.
+		settings.TunnelStrictRoute = true
+	}
+	if err := validateSettingsSecurity(settings); err != nil {
+		return nil, err
+	}
 	ifaces, _ := platform.Interfaces()
 	if settings.VPNInterface == "" {
 		for _, it := range ifaces {
@@ -76,7 +85,7 @@ func New() (*Server, error) {
 				settings.VPNInterface = it.Name
 				break
 			}
-		}
+	}
 	}
 
 	hub := newEventHub()
@@ -100,7 +109,9 @@ func New() (*Server, error) {
 		events:       hub,
 		csrf:         hex.EncodeToString(token),
 	}
-	_ = saveSettings(settingsPath, settings)
+	if err := saveSettings(settingsPath, settings); err != nil {
+		return nil, fmt.Errorf("persist normalized settings: %w", err)
+	}
 	return s, nil
 }
 
@@ -121,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnostics)
 	mux.HandleFunc("GET /api/agent-doctor", s.handleAgentDoctor)
+	mux.HandleFunc("GET /api/process-tree", s.handleProcessTree)
 	mux.HandleFunc("GET /api/logs", s.handleLogs)
 
 	mux.HandleFunc("POST /api/config", s.requireCSRF(s.handleConfig))
@@ -143,9 +155,6 @@ func (s *Server) Handler() http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(staticFS))
 
-	// FileServer already serves index.html for the directory root. Rewriting
-	// "/" to "/index.html" would trigger FileServer's canonical redirect and
-	// create a redirect loop.
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{
 			Name:     "agp_csrf",
@@ -194,10 +203,11 @@ func decodeJSON(r *http.Request, v any) error {
 
 func (s *Server) status(ctx context.Context) Status {
 	ifaces, _ := platform.Interfaces()
+	health := s.pm.Health()
 	return Status{
 		OS:                   runtime.GOOS,
 		Arch:                 runtime.GOARCH,
-		ProxyRunning:         s.pm.Running(),
+		ProxyRunning:         health.State == proxy.HealthHealthy,
 		ProxyURL:             s.pm.HTTPProxyURL(),
 		SOCKSURL:             "socks5://" + s.pm.SOCKSProxyAddr(),
 		SingBoxPath:          s.pm.Find(),
@@ -206,6 +216,7 @@ func (s *Server) status(ctx context.Context) Status {
 		AgentTunnelActive:    s.pm.AgentTunnelActive(),
 		AgentTunnelSupported: s.pm.AgentTunnelSupported(),
 		AgentTunnelHint:      s.pm.AgentTunnelPrivilegeHint(),
+		Health:               health,
 		Settings:             s.Settings(),
 		Interfaces:           ifaces,
 	}
@@ -254,6 +265,10 @@ func (s *Server) handleAgentDoctor(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, report)
 }
 
+func (s *Server) handleProcessTree(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, antigravity.DiscoverAgentProcessTree())
+}
+
 func tail(path string, n int) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -273,54 +288,106 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+type settingsPatch struct {
+	Listen               *string `json:"listen"`
+	ProxyHost            *string `json:"proxy_host"`
+	ProxyPort            *int    `json:"proxy_port"`
+	VPNInterface         *string `json:"vpn_interface"`
+	DNSProvider          *string `json:"dns_provider"`
+	SingBoxVer           *string `json:"sing_box_version"`
+	AutoOpen             *bool   `json:"auto_open"`
+	TunnelStrictRoute    *bool   `json:"tunnel_strict_route"`
+	TunnelDomainFallback *bool   `json:"tunnel_domain_fallback"`
+}
+
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	var in Settings
+	var in settingsPatch
 	if err := decodeJSON(r, &in); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	old := s.Settings()
+	cur := old
+	if in.Listen != nil {
+		cur.Listen = *in.Listen
+	}
+	if in.ProxyHost != nil {
+		cur.ProxyHost = *in.ProxyHost
+	}
+	if in.ProxyPort != nil {
+		cur.ProxyPort = *in.ProxyPort
+	}
+	if in.VPNInterface != nil {
+		cur.VPNInterface = *in.VPNInterface
+	}
+	if in.DNSProvider != nil {
+		cur.DNSProvider = *in.DNSProvider
+	}
+	if in.SingBoxVer != nil {
+		cur.SingBoxVer = *in.SingBoxVer
+	}
+	if in.AutoOpen != nil {
+		cur.AutoOpen = *in.AutoOpen
+	}
+	if in.TunnelStrictRoute != nil {
+		cur.TunnelStrictRoute = *in.TunnelStrictRoute
+	}
+	if in.TunnelDomainFallback != nil {
+		cur.TunnelDomainFallback = *in.TunnelDomainFallback
+	}
+	if runtime.GOOS == "linux" {
+		cur.TunnelStrictRoute = true
+	}
+	if err := validateSettingsSecurity(cur); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if cur.DNSProvider != "cloudflare" && cur.DNSProvider != "google" {
+		http.Error(w, "DNS provider must be cloudflare or google", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(cur.SingBoxVer) == "" {
+		http.Error(w, "sing-box version cannot be empty", http.StatusBadRequest)
+		return
+	}
+	if cur.Listen != old.Listen {
+		http.Error(w, "control-plane listen address is immutable while the server is running; edit config while stopped and restart", http.StatusConflict)
+		return
+	}
+
+	dataPlaneChanged := cur.ProxyHost != old.ProxyHost || cur.ProxyPort != old.ProxyPort ||
+		cur.VPNInterface != old.VPNInterface || cur.DNSProvider != old.DNSProvider || cur.SingBoxVer != old.SingBoxVer
+	if dataPlaneChanged {
+		if err := s.pm.UpdateStoppedConfig(cur.ProxyHost, cur.ProxyPort, cur.VPNInterface, cur.DNSProvider, cur.SingBoxVer); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+	}
+	if err := saveSettings(s.settingsPath, cur); err != nil {
+		if dataPlaneChanged {
+			_ = s.pm.UpdateStoppedConfig(old.ProxyHost, old.ProxyPort, old.VPNInterface, old.DNSProvider, old.SingBoxVer)
+		}
+		http.Error(w, "persist configuration: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
 	s.mu.Lock()
-	cur := s.settings
-	if in.Listen != "" {
-		cur.Listen = in.Listen
-	}
-	if in.ProxyHost != "" {
-		cur.ProxyHost = in.ProxyHost
-	}
-	if in.ProxyPort > 0 && in.ProxyPort < 65536 {
-		cur.ProxyPort = in.ProxyPort
-	}
-	cur.VPNInterface = in.VPNInterface
-	if in.DNSProvider == "cloudflare" || in.DNSProvider == "google" {
-		cur.DNSProvider = in.DNSProvider
-	}
-	if in.SingBoxVer != "" {
-		cur.SingBoxVer = in.SingBoxVer
-	}
-	cur.AutoOpen = in.AutoOpen
 	s.settings = cur
 	s.mu.Unlock()
-
-	s.pm.SetVPNInterface(cur.VPNInterface)
-	s.pm.SetDNSProvider(cur.DNSProvider)
-	_ = saveSettings(s.settingsPath, cur)
-	s.events.publish("info", "configuration updated")
+	s.events.publish("info", "configuration transaction committed")
 	writeJSON(w, map[string]any{"ok": true, "settings": cur})
 }
 
 func (s *Server) ensureSingBox(ctx context.Context) error {
-	if s.pm.Find() != "" {
-		return nil
-	}
-	_, err := s.pm.Install(ctx)
+	_, err := s.pm.InstallVerified(ctx)
 	return err
 }
 
 func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
-	p, err := s.pm.Install(ctx)
+	p, err := s.pm.InstallVerified(ctx)
 	if err != nil {
 		s.events.publish("error", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -329,27 +396,74 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "path": p, "version": s.pm.Version(ctx)})
 }
 
-func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
+func (s *Server) startSafeProxy(ctx context.Context) error {
+	health := s.pm.Health()
+	if s.pm.Mode() == proxy.ModeProxy && health.State == proxy.HealthHealthy {
+		return nil
+	}
+	if s.pm.ManagedRunning() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := s.pm.StopAndWait(stopCtx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("stop existing data plane: %w", err)
+		}
+	}
 	if err := s.ensureSingBox(ctx); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return err
 	}
 	if err := s.pm.Start(ctx); err != nil {
+		return err
+	}
+
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(150 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !s.pm.ManagedRunning() {
+			return fmt.Errorf("sing-box exited before safe proxy readiness")
+		}
+		if owned, _ := s.pm.ManagedListenerOwned(); owned {
+			s.events.publish("info", "SAFE proxy readiness proven by managed listener ownership")
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			_ = s.rollbackProxyStart()
+			return ctx.Err()
+		case <-deadline.C:
+			_ = s.rollbackProxyStart()
+			return fmt.Errorf("safe proxy readiness timeout; managed listener ownership not established")
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *Server) rollbackProxyStart() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.pm.StopAndWait(ctx)
+}
+
+func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
+	defer cancel()
+	if err := s.startSafeProxy(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	time.Sleep(700 * time.Millisecond)
-	writeJSON(w, map[string]any{"ok": s.pm.Running(), "proxy": s.pm.HTTPProxyURL(), "mode": "safe-proxy"})
+	writeJSON(w, map[string]any{"ok": true, "proxy": s.pm.HTTPProxyURL(), "mode": "safe-proxy", "health": s.pm.Health()})
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
-	if err := s.pm.Stop(); err != nil {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := s.pm.StopAndWait(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.events.publish("info", "proxy stop requested")
+	s.events.publish("info", "managed data plane stopped")
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -378,8 +492,8 @@ func (s *Server) handleEndpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLaunch(w http.ResponseWriter, r *http.Request) {
-	if !s.pm.Running() {
-		http.Error(w, "local proxy is not running", http.StatusConflict)
+	if health := s.pm.Health(); health.State != proxy.HealthHealthy {
+		http.Error(w, "managed proxy is not healthy", http.StatusConflict)
 		return
 	}
 	if err := antigravity.LaunchWithProxy("", s.pm.HTTPProxyURL(), "socks5://"+s.pm.SOCKSProxyAddr()); err != nil {
@@ -420,24 +534,12 @@ func (s *Server) handleHostsDisable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
-// SAFE MODE remains the low-impact first layer. It does not create a TUN and
-// therefore does not change system routes. Use Agent Tunnel only when the IDE
-// signs in successfully but the actual agent execution path still bypasses
-// HTTP_PROXY.
 func (s *Server) handleSafeMode(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
-
-	if err := s.ensureSingBox(ctx); err != nil {
+	if err := s.startSafeProxy(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
-	}
-	if !s.pm.Running() {
-		if err := s.pm.Start(ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		time.Sleep(time.Second)
 	}
 
 	files, err := antigravity.ForceProductionEndpoint()
@@ -449,8 +551,18 @@ func (s *Server) handleSafeMode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.events.publish("info", "SAFE MODE completed: proxy is process-only; system proxy untouched")
-	writeJSON(w, map[string]any{"ok": true, "settings_files": files, "mode": "safe-proxy"})
+	s.events.publish("info", "SAFE MODE completed: process-only proxy; system proxy untouched")
+	writeJSON(w, map[string]any{"ok": true, "settings_files": files, "mode": "safe-proxy", "health": s.pm.Health()})
+}
+
+func (s *Server) tunnelOptions() proxy.AgentTunnelOptions {
+	o := proxy.DefaultAgentTunnelOptions()
+	settings := s.Settings()
+	o.DomainFallback = settings.TunnelDomainFallback
+	if runtime.GOOS != "linux" {
+		o.StrictRoute = settings.TunnelStrictRoute
+	}
+	return o
 }
 
 func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
@@ -465,40 +577,32 @@ func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Agent Tunnel requires selecting and saving a VPN interface first", http.StatusBadRequest)
 		return
 	}
-	if err := s.ensureSingBox(ctx); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	if err := s.pm.StopAndWait(ctx); err != nil {
 		http.Error(w, "stop existing proxy before Agent Tunnel: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if err := s.pm.StartAgentTunnel(ctx); err != nil {
+	if err := s.pm.StartAgentTunnel(ctx, s.tunnelOptions()); err != nil {
 		s.events.publish("error", "Agent Tunnel start failed: "+err.Error())
 		http.Error(w, err.Error()+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
 		return
 	}
-
-	time.Sleep(1200 * time.Millisecond)
-	if !s.pm.Running() {
-		errText := tail(s.pm.ErrPath(), 80)
-		if errText == "" {
-			errText = "sing-box exited before the health check"
-		}
-		http.Error(w, errText+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
+	health := s.pm.Health()
+	if health.State != proxy.HealthHealthy {
+		_ = s.rollbackProxyStart()
+		http.Error(w, "Agent Tunnel returned from startup without healthy evidence", http.StatusInternalServerError)
 		return
 	}
 
-	s.events.publish("warn", "AGENT TUNNEL active: Antigravity traffic is process-routed through the selected VPN; unrelated apps use system-direct")
+	s.events.publish("warn", "AGENT TUNNEL active: verified TUN/listener/VPN evidence is healthy")
 	writeJSON(w, map[string]any{
-		"ok":              true,
-		"mode":            "agent-tunnel",
-		"active":          s.pm.AgentTunnelActive(),
-		"vpn_interface":   s.Settings().VPNInterface,
-		"privilege_hint":  s.pm.AgentTunnelPrivilegeHint(),
-		"local_proxy":     s.pm.HTTPProxyURL(),
+		"ok":               true,
+		"mode":             "agent-tunnel",
+		"active":           s.pm.AgentTunnelActive(),
+		"vpn_interface":    s.Settings().VPNInterface,
+		"privilege_hint":   s.pm.AgentTunnelPrivilegeHint(),
+		"local_proxy":      s.pm.HTTPProxyURL(),
 		"system_proxy_set": false,
+		"health":           health,
 	})
 }
 
@@ -509,7 +613,7 @@ func (s *Server) handleTunnelStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.events.publish("info", "Agent Tunnel stopped; system routes released by sing-box")
+	s.events.publish("info", "Agent Tunnel stopped; managed routes released")
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -517,7 +621,7 @@ func (s *Server) handleTunnelLaunch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
 
-	if !s.pm.AgentTunnelActive() {
+	if s.pm.Mode() != proxy.ModeAgentTunnel || s.pm.Health().State != proxy.HealthHealthy {
 		if !s.pm.AgentTunnelSupported() {
 			http.Error(w, s.pm.AgentTunnelPrivilegeHint(), http.StatusNotImplemented)
 			return
@@ -526,45 +630,48 @@ func (s *Server) handleTunnelLaunch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "select and save a VPN interface before Agent Tunnel", http.StatusBadRequest)
 			return
 		}
-		if err := s.ensureSingBox(ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
 		if err := s.pm.StopAndWait(ctx); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		if err := s.pm.StartAgentTunnel(ctx); err != nil {
+		if err := s.pm.StartAgentTunnel(ctx, s.tunnelOptions()); err != nil {
 			http.Error(w, err.Error()+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
 			return
 		}
-		time.Sleep(1200 * time.Millisecond)
 	}
 
 	files, err := antigravity.ForceProductionEndpoint()
 	if err != nil {
 		s.events.publish("warn", "endpoint override: "+err.Error())
 	}
-
-	// Keep process proxy variables as a belt-and-suspenders layer. Components
-	// that honor them use the mixed proxy; components that ignore them are still
-	// captured by the TUN process-routing layer.
 	if err := antigravity.LaunchWithProxy("", s.pm.HTTPProxyURL(), "socks5://"+s.pm.SOCKSProxyAddr()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	s.events.publish("info", "Antigravity launched in AGENT TUNNEL mode")
+	processTree := antigravity.DiscoverAgentProcessTree()
+	level := "info"
+	message := "Antigravity launched in AGENT TUNNEL mode"
+	if len(processTree.UnknownHelpers) > 0 {
+		level = "warn"
+		message = fmt.Sprintf("Antigravity launched, but %d unknown process-tree descendant(s) require egress attestation", len(processTree.UnknownHelpers))
+	}
+	s.events.publish(level, message)
 	writeJSON(w, map[string]any{
-		"ok":             true,
-		"mode":           "agent-tunnel",
-		"settings_files": files,
-		"tunnel_active":  s.pm.AgentTunnelActive(),
+		"ok":              true,
+		"mode":            "agent-tunnel",
+		"settings_files":  files,
+		"tunnel_active":   s.pm.AgentTunnelActive(),
+		"health":          s.pm.Health(),
+		"agent_processes": processTree,
 	})
 }
 
 func (s *Server) Serve(ctx context.Context) error {
 	addr := s.ListenAddr()
+	if !isLoopbackListen(addr) {
+		return fmt.Errorf("refusing non-loopback control-plane listen address %q", addr)
+	}
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
