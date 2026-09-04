@@ -277,9 +277,23 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	return os.WriteFile(path, append(b, '\n'), 0o600)
 }
 
-func (m *Manager) StartAgentTunnel(ctx context.Context, options AgentTunnelOptions) error {
+// StartAgentTunnel accepts an optional options argument to keep compatibility
+// with older callers while allowing the web UI to add strict/domain controls.
+func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelOptions) error {
 	if !m.AgentTunnelSupported() {
 		return fmt.Errorf("Agent Tunnel is unsupported on %s", runtime.GOOS)
+	}
+
+	// Agent Tunnel relies on stable 1.14.0+ TUN DNS controls. Install() is
+	// intentionally called even when some sing-box binary already exists so a
+	// stale managed 1.13.x build is upgraded before config validation.
+	if _, err := m.Install(ctx); err != nil {
+		return fmt.Errorf("ensure Agent Tunnel sing-box: %w", err)
+	}
+
+	options := DefaultAgentTunnelOptions()
+	if len(provided) > 0 {
+		options = provided[0]
 	}
 
 	m.mu.Lock()
