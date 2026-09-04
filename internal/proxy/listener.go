@@ -3,7 +3,10 @@ package proxy
 import (
 	"fmt"
 	"net"
+	"time"
 )
+
+const listenerProbeTimeout = 500 * time.Millisecond
 
 // ManagedPID returns the PID of the sing-box process started by this Manager.
 // It intentionally returns 0 for an unmanaged/finished process.
