@@ -19,6 +19,21 @@ jobs:
           cache: true
       - run: go test ./...
       - run: go vet ./...
+      - name: Validate Agent Tunnel config with real sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER=1.14.0
+          ARCHIVE="sing-box-${VER}-linux-amd64.tar.gz"
+          URL="https://github.com/SagerNet/sing-box/releases/download/v${VER}/${ARCHIVE}"
+          curl -fL --retry 4 --retry-all-errors "$URL" -o "/tmp/$ARCHIVE"
+          mkdir -p /tmp/sing-box-ci
+          tar -xzf "/tmp/$ARCHIVE" -C /tmp/sing-box-ci
+          BIN="$(find /tmp/sing-box-ci -type f -name sing-box -print -quit)"
+          test -n "$BIN"
+          chmod +x "$BIN"
+          "$BIN" version
+          AGP_SINGBOX_BIN="$BIN" go test ./internal/proxy -run TestAgentTunnelConfigAcceptedByRealSingBox -v
 
   build:
     runs-on: ubuntu-latest
