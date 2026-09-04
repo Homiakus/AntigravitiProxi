@@ -29,6 +29,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if err := srv.Close(ctx); err != nil {
+			log.Printf("network helper shutdown: %v", err)
+		}
+	}()
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	url := "http://" + srv.ListenAddr() + "/"
