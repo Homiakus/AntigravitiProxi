@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
@@ -63,41 +64,42 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 			break
 		}
 		if !m.ManagedRunning() {
-			b, _ := os.ReadFile(m.ErrPath())
-			t.Fatalf("sing-box exited during startup:\n%s", strings.TrimSpace(string(b)))
+			t.Fatalf("sing-box exited during startup:\n%s", tunnelDebug(m))
 		}
 		if time.Now().After(deadline) {
-			b, _ := os.ReadFile(m.ErrPath())
-			t.Fatalf("TUN/mixed-port health timeout; stderr:\n%s", strings.TrimSpace(string(b)))
+			t.Fatalf("TUN/mixed-port health timeout:\n%s", tunnelDebug(m))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// The CI topology exposes one destination through two interfaces. The
-	// destination reports the source IP it observed. This proves the central
-	// isolation invariant at runtime, rather than only checking generated JSON:
+	// The CI topology exposes one destination through two independent L3
+	// uplinks. The destination reports the source IP it observed. This proves
+	// the central isolation invariant at runtime, rather than only checking JSON:
 	//   Antigravity/language_server/bundled helper -> vpn-direct -> vpn0
 	//   unrelated process                         -> system-direct -> sys0
 	if probeURL := os.Getenv("AGP_EGRESS_PROBE_URL"); probeURL != "" {
 		vpnSource := strings.TrimSpace(os.Getenv("AGP_EXPECT_VPN_SOURCE"))
 		systemSource := strings.TrimSpace(os.Getenv("AGP_EXPECT_SYSTEM_SOURCE"))
+		probeBin := strings.TrimSpace(os.Getenv("AGP_EGRESS_PROBE_BIN"))
 		if vpnSource == "" || systemSource == "" {
 			t.Fatal("AGP_EXPECT_VPN_SOURCE and AGP_EXPECT_SYSTEM_SOURCE are required with AGP_EGRESS_PROBE_URL")
 		}
-
-		curl, err := exec.LookPath("curl")
-		if err != nil {
-			t.Fatalf("curl is required for runtime egress probes: %v", err)
+		if probeBin == "" {
+			t.Fatal("AGP_EGRESS_PROBE_BIN is required with AGP_EGRESS_PROBE_URL")
+		}
+		if st, err := os.Stat(probeBin); err != nil || st.IsDir() {
+			t.Fatalf("invalid AGP_EGRESS_PROBE_BIN %q: %v", probeBin, err)
 		}
 
 		probeRoot := filepath.Join(root, "egress-probes")
-		if err = os.MkdirAll(filepath.Join(probeRoot, "antigravity-bundle"), 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Join(probeRoot, "antigravity-bundle"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 
-		// Two process_name probes cover the IDE and language server. The node
-		// helper deliberately has a generic process name; only its installation
-		// path contains "antigravity", exercising process_path_regex.
+		// These are copies of our deterministic Go probe, not renamed curl. This
+		// matters because third-party clients may change their own process title.
+		// The probe prints /proc/self/comm to stderr, so failures expose exactly
+		// what the kernel and sing-box process finder had available.
 		vpnProbes := []struct {
 			name string
 			path string
@@ -108,34 +110,33 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 		}
 
 		for _, p := range vpnProbes {
-			if err = copyFile(curl, p.path, 0o755); err != nil {
+			if err := copyFile(probeBin, p.path, 0o755); err != nil {
 				t.Fatalf("prepare %s probe: %v", p.name, err)
 			}
-			got, probeErr := runSourceProbe(p.path, probeURL)
+			got, meta, probeErr := runSourceProbe(p.path, probeURL)
 			if probeErr != nil {
-				t.Fatalf("%s failed: %v\nsing-box stderr:\n%s", p.name, probeErr, tailTestFile(m.ErrPath()))
+				t.Fatalf("%s failed: %v\nprobe: %s\n%s", p.name, probeErr, meta, tunnelDebug(m))
 			}
 			if got != vpnSource {
-				t.Fatalf("%s escaped selected VPN: source=%q want=%q", p.name, got, vpnSource)
+				t.Fatalf("%s escaped selected VPN: source=%q want=%q; probe=%s\n%s", p.name, got, vpnSource, meta, tunnelDebug(m))
 			}
-			t.Logf("%s -> selected VPN source %s", p.name, got)
+			t.Logf("%s -> selected VPN source %s (%s)", p.name, got, meta)
 		}
 
-		got, probeErr := runSourceProbe(curl, probeURL)
+		got, meta, probeErr := runSourceProbe(probeBin, probeURL)
 		if probeErr != nil {
-			t.Fatalf("ordinary process probe failed: %v\nsing-box stderr:\n%s", probeErr, tailTestFile(m.ErrPath()))
+			t.Fatalf("ordinary process probe failed: %v\nprobe: %s\n%s", probeErr, meta, tunnelDebug(m))
 		}
 		if got != systemSource {
-			t.Fatalf("unrelated process was captured by Agent Tunnel: source=%q want system=%q", got, systemSource)
+			t.Fatalf("unrelated process was captured by Agent Tunnel: source=%q want system=%q; probe=%s\n%s", got, systemSource, meta, tunnelDebug(m))
 		}
-		t.Logf("ordinary process -> system-direct source %s", got)
+		t.Logf("ordinary process -> system-direct source %s (%s)", got, meta)
 	}
 
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopCancel()
 	if err := m.StopAndWait(stopCtx); err != nil {
-		b, _ := os.ReadFile(m.ErrPath())
-		t.Fatalf("graceful stop: %v; stderr:\n%s", err, strings.TrimSpace(string(b)))
+		t.Fatalf("graceful stop: %v; %s", err, tunnelDebug(m))
 	}
 	if m.ManagedRunning() || m.TunnelRunning() {
 		t.Fatal("manager still reports running after graceful stop")
@@ -154,22 +155,16 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 	}
 }
 
-func runSourceProbe(binary, target string) (string, error) {
-	cmd := exec.Command(binary,
-		"--silent",
-		"--show-error",
-		"--fail",
-		"--connect-timeout", "3",
-		"--max-time", "6",
-		"--noproxy", "*",
-		target,
-	)
+func runSourceProbe(binary, target string) (source, meta string, err error) {
+	cmd := exec.Command(binary, target)
 	cmd.Env = probeEnvironment(os.Environ())
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if runErr := cmd.Run(); runErr != nil {
+		return "", strings.TrimSpace(stderr.String()), fmt.Errorf("%w: %s", runErr, strings.TrimSpace(stdout.String()))
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), nil
 }
 
 func probeEnvironment(base []string) []string {
@@ -190,14 +185,18 @@ func probeEnvironment(base []string) []string {
 	return append(out, "NO_PROXY=*", "no_proxy=*")
 }
 
+func tunnelDebug(m *Manager) string {
+	return "sing-box stdout:\n" + tailTestFile(m.LogPath()) + "\nsing-box stderr:\n" + tailTestFile(m.ErrPath())
+}
+
 func tailTestFile(path string) string {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}
 	lines := strings.Split(string(b), "\n")
-	if len(lines) > 60 {
-		lines = lines[len(lines)-60:]
+	if len(lines) > 80 {
+		lines = lines[len(lines)-80:]
 	}
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
