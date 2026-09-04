@@ -10,6 +10,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/Homiakus/AntigravitiProxi/internal/atomicfile"
 )
 
 const agentTunnelTag = "agent-tun"
@@ -92,8 +94,8 @@ func (m *Manager) AgentTunnelPrivilegeHint() string {
 }
 
 // StopAndWait switches modes safely without racing the sing-box wait goroutine.
-// Linux first sends SIGTERM so sing-box can remove nftables/routes cleanly; if
-// it does not exit before the caller's deadline we force-kill it as a fallback.
+// Linux first sends SIGTERM so sing-box can remove routing state cleanly; if it
+// does not exit before the caller's deadline we force-kill it as a fallback.
 func (m *Manager) StopAndWait(ctx context.Context) error {
 	if err := m.Stop(); err != nil {
 		return err
@@ -235,7 +237,6 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	// otherwise every TCP flow can reach sniff before process attribution and the
 	// selective process policy is not authoritative.
 	routeRules := []any{
-		// Keep the mixed port useful for HTTP/SOCKS diagnostics while TUN is on.
 		map[string]any{
 			"inbound":  []string{"local-mixed"},
 			"action":   "route",
@@ -253,9 +254,6 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 			"action":             "route",
 			"outbound":           "vpn-direct",
 		},
-		// Only flows that were not already attributed by process reach sniff.
-		// Sniffing then enables the optional domain fallback for renamed/unknown
-		// helper processes.
 		map[string]any{
 			"inbound": []string{agentTunnelTag},
 			"action":  "sniff",
@@ -303,19 +301,19 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o600)
+	return atomicfile.Write(path, append(b, '\n'), 0o600)
 }
 
 // StartAgentTunnel accepts an optional options argument to keep compatibility
 // with older callers while allowing the web UI to add strict/domain controls.
+// Startup is transactional at the managed-process boundary: success is not
+// reported until the TUN exists and the mixed listener is proven to belong to
+// the newly started sing-box process. Failed readiness triggers rollback.
 func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelOptions) error {
 	if !m.AgentTunnelSupported() {
 		return fmt.Errorf("Agent Tunnel is unsupported on %s", runtime.GOOS)
 	}
 
-	// Agent Tunnel relies on stable 1.14.0+ TUN DNS controls. Install() is
-	// intentionally called even when some sing-box binary already exists so a
-	// stale managed 1.13.x build is upgraded before config validation.
 	binary, err := m.Install(ctx)
 	if err != nil {
 		return fmt.Errorf("ensure Agent Tunnel sing-box: %w", err)
@@ -328,29 +326,95 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 	if len(provided) > 0 {
 		options = provided[0]
 	}
+	// Linux strict routing is not a preference: the dual-egress runtime test
+	// proved it is required for authoritative host-flow capture before process
+	// classification. Do not allow a UI/API false value to reintroduce bypass.
+	if runtime.GOOS == "linux" {
+		options.StrictRoute = true
+	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.cmd != nil && m.cmd.Process != nil {
-		return fmt.Errorf("sing-box already started by this process in %s mode; stop it before starting Agent Tunnel", m.mode)
+		mode := m.mode
+		m.mu.Unlock()
+		return fmt.Errorf("sing-box already started by this process in %s mode; stop it before starting Agent Tunnel", mode)
 	}
 	vpn := strings.TrimSpace(m.cfg.VPNInterface)
 	if vpn == "" {
+		m.mu.Unlock()
 		return errors.New("Agent Tunnel requires an explicit VPN interface")
 	}
 	if vpn == "antigravity-tun" {
+		m.mu.Unlock()
 		return errors.New("Agent Tunnel cannot use its own TUN interface as the VPN upstream")
 	}
 	iface, err := net.InterfaceByName(vpn)
 	if err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("selected VPN interface %q does not exist: %w", vpn, err)
 	}
 	if iface.Flags&net.FlagUp == 0 {
+		m.mu.Unlock()
 		return fmt.Errorf("selected VPN interface %q is down", vpn)
 	}
 	if err := writeAgentTunnelConfig(m.cfg, m.TunnelConfigPath(), options); err != nil {
+		m.mu.Unlock()
 		return err
 	}
-	return m.startLocked(ctx, m.TunnelConfigPath(), ModeAgentTunnel,
-		fmt.Sprintf("Agent Tunnel started: TUN -> Antigravity process/domain policy -> %s; unrelated traffic -> system-direct", m.cfg.VPNInterface))
+	err = m.startLocked(ctx, m.TunnelConfigPath(), ModeAgentTunnel,
+		fmt.Sprintf("Agent Tunnel starting: TUN -> Antigravity process/domain policy -> %s; unrelated traffic -> system-direct", m.cfg.VPNInterface))
+	m.mu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	if err := m.waitAgentTunnelReady(ctx, 8*time.Second); err != nil {
+		return m.rollbackFailedAgentTunnelStart(err)
+	}
+	m.log("info", "Agent Tunnel readiness proven: managed listener ownership + TUN interface")
+	return nil
+}
+
+func (m *Manager) waitAgentTunnelReady(ctx context.Context, maxWait time.Duration) error {
+	deadline := time.NewTimer(maxWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	last := "waiting for managed listener and TUN"
+
+	for {
+		if !m.ManagedRunning() {
+			return errors.New("sing-box exited before Agent Tunnel readiness was established")
+		}
+		tunOK := false
+		if iface, err := net.InterfaceByName("antigravity-tun"); err == nil && iface.Flags&net.FlagUp != 0 {
+			tunOK = true
+		}
+		listenerOK, detail := m.ManagedListenerOwned()
+		if tunOK && listenerOK {
+			return nil
+		}
+		last = fmt.Sprintf("tun_up=%v listener_owned=%v (%s)", tunOK, listenerOK, detail)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("Agent Tunnel readiness cancelled: %w; last=%s", ctx.Err(), last)
+		case <-deadline.C:
+			return fmt.Errorf("Agent Tunnel readiness timeout after %s; last=%s", maxWait, last)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) rollbackFailedAgentTunnelStart(cause error) error {
+	m.log("error", "Agent Tunnel readiness failed; rolling back: "+cause.Error())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := m.StopAndWait(ctx); err != nil {
+		return fmt.Errorf("%w; rollback also failed: %v", cause, err)
+	}
+	if _, err := net.InterfaceByName("antigravity-tun"); err == nil {
+		return fmt.Errorf("%w; rollback stopped sing-box but antigravity-tun still exists", cause)
+	}
+	return cause
 }
