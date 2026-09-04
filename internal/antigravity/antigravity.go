@@ -17,7 +17,7 @@ const ProductionCloudCodeURL = "https://cloudcode-pa.googleapis.com"
 var endpointRE = regexp.MustCompile(`(?m)"jetski\.cloudCodeUrl"\s*:\s*"[^"]*"`)
 
 func SettingsCandidates() []string {
-	home, _ := os.UserHomeDir()
+	home := effectiveUserHome()
 	out := []string{}
 	if runtime.GOOS == "windows" {
 		app := os.Getenv("APPDATA")
@@ -28,15 +28,14 @@ func SettingsCandidates() []string {
 			)
 		}
 	} else {
-		cfg := os.Getenv("XDG_CONFIG_HOME")
-		if cfg == "" && home != "" {
-			cfg = filepath.Join(home, ".config")
-		}
+		cfg := effectiveConfigHome(home)
 		if cfg != "" {
 			out = append(out,
 				filepath.Join(cfg, "Antigravity", "User", "settings.json"),
 				filepath.Join(cfg, "antigravity", "User", "settings.json"),
 				filepath.Join(cfg, "Google", "Antigravity", "User", "settings.json"),
+				filepath.Join(cfg, "Antigravity IDE", "User", "settings.json"),
+				filepath.Join(cfg, "antigravity-ide", "User", "settings.json"),
 			)
 		}
 	}
@@ -96,7 +95,7 @@ func ForceProductionEndpoint() ([]string, error) {
 }
 
 func FindExecutable() string {
-	names := []string{"antigravity", "antigravity-desktop"}
+	names := []string{"antigravity", "antigravity-ide", "antigravity-desktop"}
 	if runtime.GOOS == "windows" {
 		names = []string{"Antigravity.exe", "antigravity.exe"}
 	}
@@ -106,7 +105,7 @@ func FindExecutable() string {
 		}
 	}
 
-	home, _ := os.UserHomeDir()
+	home := effectiveUserHome()
 	var candidates []string
 	if runtime.GOOS == "windows" {
 		local := os.Getenv("LOCALAPPDATA")
@@ -119,9 +118,18 @@ func FindExecutable() string {
 	} else {
 		candidates = []string{
 			"/usr/bin/antigravity",
+			"/usr/bin/antigravity-ide",
 			"/usr/local/bin/antigravity",
+			"/usr/local/bin/antigravity-ide",
 			"/opt/Antigravity/antigravity",
+			"/opt/antigravity/antigravity",
+			"/opt/antigravity/Antigravity",
+			"/opt/antigravity-ide/Antigravity-IDE/bin/antigravity-ide",
+			"/opt/antigravity-ide/Antigravity-IDE/antigravity-ide",
 			filepath.Join(home, ".local", "bin", "antigravity"),
+			filepath.Join(home, ".local", "bin", "antigravity-ide"),
+			filepath.Join(home, ".local", "opt", "antigravity", "antigravity"),
+			filepath.Join(home, ".local", "opt", "antigravity-ide", "Antigravity-IDE", "bin", "antigravity-ide"),
 		}
 	}
 	for _, p := range candidates {
@@ -146,7 +154,12 @@ func LaunchWithProxy(exe, httpProxy, socksProxy string) error {
 	}
 
 	cmd := exec.Command(exe)
-	cmd.Env = processProxyEnv(os.Environ(), httpProxy, socksProxy)
+	env := processProxyEnv(os.Environ(), httpProxy, socksProxy)
+	preparedEnv, err := prepareLaunchCommand(cmd, env)
+	if err != nil {
+		return err
+	}
+	cmd.Env = preparedEnv
 	if err := cmd.Start(); err != nil {
 		return err
 	}
