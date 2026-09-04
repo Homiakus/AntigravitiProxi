@@ -413,6 +413,7 @@ func (m *Manager) startLocked(ctx context.Context, configPath string, mode Mode,
 
 	cmd := exec.Command(p, "run", "-c", configPath)
 	cmd.Stdout, cmd.Stderr = logf, errF
+	prepareManagedCommand(cmd)
 	if err = cmd.Start(); err != nil {
 		_ = logf.Close()
 		_ = errF.Close()
@@ -458,7 +459,7 @@ func (m *Manager) Stop() error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	return cmd.Process.Kill()
+	return stopManagedProcess(cmd.Process)
 }
 
 // Running reports whether the local mixed diagnostic port is reachable. Both
