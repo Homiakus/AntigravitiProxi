@@ -5,6 +5,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -17,7 +18,7 @@ import (
 
 // TestLinuxAgentTunnelRuntimeSmoke is opt-in and is executed by CI inside an
 // isolated Linux network namespace. Unlike the schema test, this starts the
-// real pinned sing-box, creates the TUN, installs routes/nftables state, proves
+// real pinned sing-box, creates the TUN, installs routes state, proves
 // process/path-aware dual egress, then performs a graceful shutdown and
 // verifies TUN cleanup.
 func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
@@ -50,6 +51,13 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 	if err := copyFile(bin, m.ManagedPath(), 0o755); err != nil {
 		t.Fatalf("prepare pinned sing-box: %v", err)
 	}
+	// The workflow itself downloads the exact pinned official release before
+	// entering this isolated namespace. The namespace has deliberately no
+	// Internet path, so seed provenance for that already-vetted fixture rather
+	// than weakening InstallVerified with a production test bypass.
+	if err := seedRuntimeFixtureProvenance(m); err != nil {
+		t.Fatalf("prepare verified provenance: %v", err)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -60,14 +68,15 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		_, tunErr := net.InterfaceByName("antigravity-tun")
-		if tunErr == nil && m.Running() && m.TunnelRunning() {
+		owned, _ := m.ManagedListenerOwned()
+		if tunErr == nil && owned && m.TunnelRunning() {
 			break
 		}
 		if !m.ManagedRunning() {
 			t.Fatalf("sing-box exited during startup:\n%s", tunnelDebug(m))
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("TUN/mixed-port health timeout:\n%s", tunnelDebug(m))
+			t.Fatalf("TUN/owned-listener health timeout:\n%s", tunnelDebug(m))
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -96,10 +105,6 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		// These are copies of our deterministic Go probe, not renamed curl. This
-		// matters because third-party clients may change their own process title.
-		// The probe prints /proc/self/comm to stderr, so failures expose exactly
-		// what the kernel and sing-box process finder had available.
 		vpnProbes := []struct {
 			name string
 			path string
@@ -153,6 +158,29 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func seedRuntimeFixtureProvenance(m *Manager) error {
+	hash, err := sha256File(m.ManagedPath())
+	if err != nil {
+		return err
+	}
+	cfg := m.Config()
+	p := managedProvenance{
+		Version:       cfg.SingBoxVer,
+		Asset:         assetNameFor("linux", "amd64", cfg.SingBoxVer),
+		ReleaseDigest: "sha256:ci-verified-fixture",
+		BinarySHA256:  hash,
+		VerifiedAt:    time.Now().UTC().Format(time.RFC3339),
+	}
+	b, err := json.MarshalIndent(p, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(m.provenancePath()), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(m.provenancePath(), append(b, '\n'), 0o600)
 }
 
 func runSourceProbe(binary, target string) (source, meta string, err error) {
