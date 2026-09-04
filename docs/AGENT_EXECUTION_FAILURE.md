@@ -1,279 +1,239 @@
-# Agent execution terminated due to error — исследование и архитектура решения
+# Agent execution terminated due to error — диагностика и Agent Tunnel
 
-## Контекст
+## Проблема
 
-Сценарий, который требуется закрыть в AntigravitiProxi:
+Целевой сценарий:
 
 1. OAuth / регистрация Antigravity проходит.
-2. IDE открывается и аккаунт распознаётся.
-3. При первом или последующих запросах Agent завершается сообщением `Agent execution terminated due to error`.
+2. IDE открывается, аккаунт и модели видны.
+3. При реальном запросе агент завершается сообщением `Agent execution terminated due to error`.
 
-Это **не одна ошибка**, а общий UI-симптом. Реальная причина находится в `ls-main.log`, language-server/agent logs, MCP/hook logs или backend response.
+Это не самостоятельный код ошибки, а общий UI-симптом. Причина может находиться в transport path, DNS, backend response, account eligibility, MCP/hooks, OAuth refresh или локальном состоянии IDE.
 
-## Что показывает исследование
+## Транспортная лестница AntigravitiProxi
 
-### 1. Process-only HTTP_PROXY недостаточен как единственный механизм
+### Level 1 — SAFE MODE
 
-Текущий SAFE MODE передаёт `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` только процессу Antigravity и его потомкам. Это безопасно для Fusion 360, но не гарантирует перехват всех transport paths.
-
-Antigravity использует несколько процессов/сетевых клиентов: IDE, language server, `node.exe`, agent harness, CLI-compatible Cloud Code path. Любой из них может:
-
-- открыть сокет напрямую;
-- использовать библиотеку, которая не читает `HTTP_PROXY`;
-- использовать отдельный Cloud Code endpoint override;
-- использовать UDP/QUIC;
-- унаследовать старый `CLOUD_CODE_URL`;
-- разрешить DNS вне локального proxy.
-
-Поэтому OAuth может работать, а generation path — уходить другим маршрутом.
-
-### 2. Отдельно существует серверный geo/account слой
-
-Характерная запись:
+SAFE MODE остаётся первым и наиболее безопасным режимом:
 
 ```text
-FAILED_PRECONDITION (code 400): User location is not supported for the API use.
+Antigravity
+   │ process-only HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
+   ▼
+127.0.0.1:7890
+   ▼
+sing-box mixed inbound
+   ▼
+secure DoH + selected VPN interface
 ```
 
-Она встречается даже тогда, когда логин и получение списка моделей проходят успешно.
+Он не меняет системный HTTP proxy и не создаёт TUN. Это минимизирует влияние на Fusion 360, Autodesk и остальные приложения.
 
-Нужно различать два разных случая:
+Одновременно launcher:
 
-- **egress-side**: один и тот же аккаунт работает через один IP/ASN и не работает через другой;
-- **account-side**: один аккаунт стабильно не работает, а другой на том же компьютере/маршруте работает.
+- удаляет унаследованный `CLOUD_CODE_URL`;
+- задаёт `CLOUD_CODE_URL=https://cloudcode-pa.googleapis.com`;
+- фиксирует `jetski.cloudCodeUrl` в `settings.json` на production endpoint.
 
-Локальный proxy способен исправить только первый случай. Серверный country association / eligibility локально изменить нельзя.
+### Level 2 — AGENT TUNNEL
 
-### 3. Старый `CLOUD_CODE_URL` способен пережить настройку IDE
-
-Antigravity/agy имеет Cloud Code endpoint override. Поэтому одной записи `jetski.cloudCodeUrl` в `settings.json` недостаточно, если процесс наследует `CLOUD_CODE_URL` из окружения.
-
-SAFE MODE теперь обязан:
-
-1. удалить унаследованный `CLOUD_CODE_URL`;
-2. добавить:
+Если регистрация проходит, но agent transport игнорирует proxy environment, используется TUN:
 
 ```text
-CLOUD_CODE_URL=https://cloudcode-pa.googleapis.com
+Antigravity.exe / language_server* / agy* / bundled helpers
+                         │
+                         ▼
+                    sing-box TUN
+                         │
+            process_name / process_path_regex
+                         │
+                         ▼
+                     vpn-direct
+                         │ bind_interface
+                         ▼
+                 selected VPN interface
+                         │
+                         ▼
+                       Google
+
+unrelated traffic
+      │
+      └──────────────→ system-direct
 ```
 
-3. параллельно оставить `jetski.cloudCodeUrl` на production endpoint.
+Режим реализован в `internal/proxy/tunnel.go` и управляется из web UI.
 
-Это реализовано в `internal/antigravity/antigravity.go`.
+## Что реализовано в Agent Tunnel MVP
 
-## Диагностическая матрица
+- Windows + Linux support gate;
+- stable `sing-box 1.14.0` как pinned managed runtime;
+- автоматическое обновление старого managed `1.13.1` до `1.14.0`;
+- SHA-256 digest verification по GitHub Release metadata;
+- TUN inbound + local mixed inbound в одном процессе sing-box;
+- `auto_route=true`;
+- `dns_mode=hijack`;
+- `strict_route=false` по умолчанию;
+- Linux `auto_redirect=true`;
+- process matching через `process_name` и `process_path_regex`;
+- отдельный `vpn-direct`, привязанный к выбранному VPN-интерфейсу;
+- отдельный `system-direct` для остальных соединений;
+- `route.auto_detect_interface=true` для защиты от TUN routing loop;
+- secure DoH через выбранный VPN для Antigravity processes и критичных Google namespaces;
+- local DNS для unrelated traffic;
+- narrow domain fallback для известных Antigravity/Cloud Code endpoints;
+- private/LAN/link-local destination exclusion;
+- SAFE MODE HTTP/SOCKS proxy остаётся активным как дополнительный слой;
+- start / stop / launch API;
+- Agent Tunnel card в progressive web UI;
+- Agent Doctor в web UI и отдельный `cmd/agent-doctor`;
+- unit tests на изоляцию routing policy;
+- CI schema-validation реальным pinned sing-box через `sing-box check`.
 
-| Наблюдение | Наиболее вероятный слой | Действие |
-|---|---|---|
-| `FAILED_PRECONDITION` + `User location is not supported` | geo / account / egress | A/B account + IP, Agent Tunnel |
-| Claude работает, Gemini нет | Gemini backend / geo | проверить egress и account association |
-| другой аккаунт работает на том же ПК | account-side | официальный account-country/support flow |
-| тот же аккаунт работает через другой exit | egress-side | менять маршрут / Agent Tunnel |
-| MCP Error | MCP | отключить MCP и включать по одному |
-| PreToolUse / hook error | hook / extension | отключить конкретный hook/extension |
-| `workspaceStorage` / extension host | local state | targeted backup/reset |
-| 429 / RESOURCE_EXHAUSTED | quota | quota diagnosis |
-| 502 / 503 | backend/transient | retry/backoff + latest IDE |
-| OAuth работает, agent нет, proxy tests зелёные | split transport | Transparent Agent Tunnel |
+## Почему sing-box 1.14.0
 
-## Решение уровня P1: Agent Tunnel
+Agent Tunnel использует TUN `dns_mode`, поэтому проект закреплён на stable `1.14.0`. Конфиг дополнительно проверяется не только Go-тестами структуры JSON, но и настоящим `sing-box check` в CI.
 
-### Задача
+## Process policy
 
-Перехватывать **весь сетевой трафик Antigravity-related процессов**, даже если конкретный runtime игнорирует proxy environment, при этом не переводить Fusion 360 и остальные приложения на HTTP proxy.
-
-### Windows
-
-Основной backend — `sing-box TUN` с process-aware routing.
-
-Целевые процессы:
+Основные идентификаторы:
 
 ```text
 Antigravity.exe
-Antigravity IDE.exe
+antigravity
+antigravity-desktop
 language_server.exe
-language_server_windows.exe
 language_server_windows_x64.exe
+language_server_windows_arm64.exe
+language_server_linux_x64
+language_server_linux_arm64
+language_server
 agy.exe
-node.exe
+agy
 ```
 
-Концепция:
+Дополнительно применяется `process_path_regex`, чтобы перехватывать bundled helper/Node runtime внутри установки Antigravity, не маршрутизируя глобально любой `node.exe` на машине.
+
+## DNS policy
+
+Для Antigravity-related процессов используются pinned DoH resolvers:
 
 ```text
-Antigravity / language_server / node
-            │
-            ▼
-      sing-box TUN
-            │
-     process_name rule
-            │
-            ▼
-    selected VPN interface
-            │
-         Google
-
-Fusion 360 / Autodesk
-            │
-       direct/bypass
-            │
-      normal network
+Cloudflare: 1.1.1.1:443 + SNI cloudflare-dns.com
+или
+Google:     8.8.8.8:443 + SNI dns.google
 ```
 
-`sing-box` поддерживает `process_name`, `process_path` и `process_path_regex` на Windows/Linux/macOS для TUN route rules.
-
-#### Почему не DLL injection как основной backend
-
-Winsock hooking работает точечно, но остаётся зависимым от:
-
-- конкретных API (`connect`, `ConnectEx`, DNS hooks и т.д.);
-- изменений Antigravity;
-- дочерних процессов;
-- антивирусов/EDR;
-- UDP/QUIC;
-- ABI и архитектуры.
-
-Он может быть добавлен как Windows fallback, но TUN является более полным транспортным слоем.
-
-### Linux
-
-Два режима:
-
-1. `sing-box TUN + process rules` — простой общий backend;
-2. dedicated network namespace для Antigravity — максимальная изоляция, чтобы остальные процессы пользователя вообще не заходили в TUN.
-
-Целевая архитектура Linux P2:
-
-```text
-host namespace
-  ├── Firefox/Fusion-equivalent/etc → normal route
-  └── Antigravity launcher
-          ↓
-     dedicated netns
-          ↓
-       sing-box
-          ↓
-      VPN interface
-```
-
-## Egress integrity
-
-Agent Tunnel должен проверять **именно agent path**, а не только браузерный IP.
-
-Минимальные probes:
+Критичные namespaces включают:
 
 ```text
 antigravity.google
+accounts.google.com
 oauth2.googleapis.com
 cloudcode-pa.googleapis.com
 daily-cloudcode-pa.googleapis.com
-generativelanguage.googleapis.com
-www.googleapis.com
+*.googleapis.com
 ```
 
-Для каждого пути фиксировать:
+Остальной DNS остаётся на `local-dns`.
 
-- DNS A/AAAA;
-- selected interface;
-- source IP;
-- remote IP;
-- TLS result;
-- HTTP result;
-- proxy/TUN mode;
-- process responsible for connection (где доступно).
+## Важное ограничение изоляции
 
-## Account-vs-egress A/B диагностика
+На Windows стандартный sing-box TUN с `auto_route` получает пакеты на уровне системной маршрутизации, после чего policy отправляет unrelated traffic в `system-direct`. Это намного безопаснее глобального HTTP proxy, но технически не означает, что чужой процесс вообще не проходит через TUN ingress.
 
-В UI нужен отдельный wizard.
+Поэтому:
 
-### Test A — same account, alternate egress
+- SAFE MODE остаётся Level 1;
+- Agent Tunnel включается только при реальном split-transport симптоме;
+- `strict_route=false` остаётся дефолтом;
+- для максимальной изоляции Windows будущий P2 backend может использовать более точный WFP/WinDivert process capture;
+- на Linux будущий максимальный режим — отдельный network namespace для Antigravity.
 
-Если аккаунт начинает работать на другом стабильном exit, проблема транспортная/IP/ASN.
+## Права
 
-### Test B — alternate account, same egress
+### Windows
 
-Если другой eligible account работает на том же exit, проблема account-side.
+TUN и системные маршруты обычно требуют запуск AntigravitiProxi от Administrator.
 
-### Test C — Antigravity CLI canary
+### Linux
 
-CLI использует общий agent harness и позволяет отделить IDE-local state от backend/account/network.
+Нужны root либо capabilities, достаточные для TUN/route management, прежде всего `CAP_NET_ADMIN`; для некоторых сценариев также нужен `CAP_NET_RAW`. При `auto_redirect` требуется рабочий nftables/NFQUEUE path.
 
-Результаты:
+## Как запускать
 
-```text
-IDE fail + CLI fail  -> backend/account/egress
-IDE fail + CLI works -> IDE state / IDE transport / extension/MCP
-```
+1. Включить VPN.
+2. Запустить AntigravitiProxi.
+3. В web UI выбрать конкретный VPN interface и сохранить.
+4. Сначала попробовать **SAFE MODE**.
+5. Если OAuth работает, а Agent падает — перезапустить AntigravitiProxi с нужными правами.
+6. Нажать **Agent Tunnel + запустить IDE**.
+7. В новом пустом диалоге выполнить простой запрос `hello`.
+8. Если ошибка остаётся — нажать **Agent Doctor**.
 
-## Локальное состояние
-
-Полный wipe профиля не должен быть первым шагом. Нужен targeted reset с backup:
-
-1. workspaceStorage конкретного workspace;
-2. `User/globalStorage/google.antigravity`;
-3. CachedData / Cache / Code Cache / GPUCache;
-4. extension state;
-5. OAuth только если doctor нашёл auth signature.
-
-## Agent Doctor
-
-Уже реализован:
+CLI Doctor:
 
 ```bash
 go run ./cmd/agent-doctor
 ```
 
-Doctor классифицирует:
+## Диагностическая матрица
 
-- geo/eligibility;
-- account permission;
-- MCP;
-- hooks;
-- auth refresh;
-- quota;
-- capacity/backend errors;
-- workspace/extension state;
-- generic termination.
+| Наблюдение | Вероятный слой | Действие |
+|---|---|---|
+| OAuth работает, Agent нет, SAFE MODE не помогает | split transport | Agent Tunnel |
+| Tunnel исправляет Agent | egress/transport path | оставить Tunnel для Antigravity |
+| `FAILED_PRECONDITION` + `User location is not supported` | geo/account/egress | A/B account + egress |
+| другой eligible account работает на том же egress | account-side | официальный Google account-country/support flow |
+| тот же account работает на другом egress | IP/ASN/egress-side | использовать рабочий egress |
+| MCP Error | MCP | отключить MCP и возвращать по одному |
+| PreToolUse / hook error | hook / extension | отключить конкретный hook |
+| invalid_grant / token refresh | OAuth session | targeted sign-out/re-auth |
+| 429 / RESOURCE_EXHAUSTED | quota | quota diagnosis |
+| 502 / 503 | backend/transient | retry/backoff/другой model |
+| workspaceStorage / extension host | local state | targeted backup/reset |
 
-Следующий этап — встроить Doctor в web UI и связать findings с автоматическими repair actions.
+## Level 3 — eligibility diagnosis
 
-## Приоритет реализации
+Agent Tunnel исправляет транспорт, но не может менять server-side country/account eligibility.
 
-### P1.0 — немедленно
+Нужны два A/B теста:
 
-- [x] Agent Doctor CLI.
-- [x] sanitize inherited `CLOUD_CODE_URL`.
-- [x] force `CLOUD_CODE_URL=https://cloudcode-pa.googleapis.com` for child process.
-- [ ] добавить `generativelanguage.googleapis.com` и `www.googleapis.com` в web diagnostics.
-- [ ] Agent Doctor panel в web UI.
+```text
+A: same account + alternate egress
+B: alternate eligible account + same egress
+```
 
-### P1.1 — Agent Tunnel MVP
+Интерпретация:
 
-- [ ] отдельный `agent-tun.json` generator;
-- [ ] Windows/Linux TUN launch;
-- [ ] process rules for Antigravity/language_server/node/agy;
-- [ ] explicit Autodesk/Fusion bypass presets;
-- [ ] privileged helper;
-- [ ] start/stop rollback of routes;
-- [ ] health check after tunnel startup;
-- [ ] SAFE MODE fallback: ENV proxy → if agent transport leak detected → Agent Tunnel.
+```text
+A начинает работать → egress/IP/ASN issue
+B начинает работать → account-side eligibility issue
+оба не работают     → transport/backend/local state требует дальнейшей диагностики
+```
 
-### P1.2 — adaptive diagnosis
-
-- [ ] parse latest `ls-main.log` after failed run;
-- [ ] classify account-side vs egress-side;
-- [ ] CLI canary;
-- [ ] per-model A/B test;
-- [ ] egress/ASN fingerprint;
-- [ ] trajectory/error ID extraction in web UI;
-- [ ] exportable redacted diagnostic bundle.
+Если backend явно возвращает `User location is not supported`, не следует бесконечно усложнять локальный proxy: Agent Doctor должен зафиксировать Trajectory/Trace ID, а дальнейшее решение зависит от того, egress-side это или server-side account association.
 
 ## Инварианты
 
-1. Не менять глобальный HTTP proxy Windows/Linux в штатном режиме.
-2. Не ломать Fusion 360/Autodesk ради Antigravity.
-3. Любая privileged network modification имеет rollback.
-4. Никакого отключения TLS verification.
-5. Не хранить OAuth tokens в diagnostic bundle.
-6. Не обещать исправление server-side account eligibility локальными действиями.
-7. Production Cloud Code endpoint должен быть однозначным на settings + process env уровнях.
+1. Не включать глобальный WinINET/WinHTTP proxy в штатном режиме.
+2. SAFE MODE всегда остаётся первым уровнем.
+3. Agent Tunnel включается явно и должен иметь rollback через Stop.
+4. Не отключать TLS verification.
+5. Не хранить OAuth/bearer tokens в diagnostic output.
+6. Production Cloud Code endpoint фиксируется на settings + process-env уровнях.
+7. Unrelated traffic не отправляется в `vpn-direct` без совпадения policy.
+8. Не обещать локальное исправление server-side account eligibility.
+
+## Следующее усиление
+
+Приоритет после MVP:
+
+- Windows UAC one-click restart;
+- Linux capability/nftables preflight;
+- реальная TUN health-проверка, а не только mixed-port health;
+- PID/process-path → egress verification;
+- automatic rollback watchdog;
+- stale TUN cleanup после crash;
+- dynamic discovery backend hostnames из language-server logs/SNI;
+- transport ladder wizard `SAFE MODE → AGENT TUNNEL → ELIGIBILITY DIAGNOSIS`;
+- Windows WFP/WinDivert backend для максимально точного process-only transparent capture;
+- Linux dedicated network namespace backend.
