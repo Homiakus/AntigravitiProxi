@@ -80,9 +80,10 @@ jobs:
           sudo ip netns add "${CLIENT_NS}"
           sudo ip netns add "${SINK_NS}"
 
-          # Two physically distinct client egress interfaces terminate on the
-          # same sink L2 segment. The system route prefers sys0; sing-box's
-          # vpn-direct binds selected Antigravity traffic to vpn0.
+          # Two independent L3 uplinks. The ordinary host default route prefers
+          # sys0. The test destination (203.0.113.10) is reachable only through
+          # a default route, so it cannot bypass TUN merely because of a more
+          # specific pre-existing host/subnet route.
           sudo ip link add agp-vpn type veth peer name agp-vpnp
           sudo ip link add agp-sys type veth peer name agp-sysp
           sudo ip link set agp-vpn netns "${CLIENT_NS}"
@@ -93,23 +94,19 @@ jobs:
           sudo ip netns exec "${CLIENT_NS}" ip link set lo up
           sudo ip netns exec "${CLIENT_NS}" ip link set agp-vpn name vpn0
           sudo ip netns exec "${CLIENT_NS}" ip link set agp-sys name sys0
-          sudo ip netns exec "${CLIENT_NS}" ip addr add 198.18.0.2/32 dev vpn0
-          sudo ip netns exec "${CLIENT_NS}" ip addr add 198.18.0.3/32 dev sys0
+          sudo ip netns exec "${CLIENT_NS}" ip addr add 10.250.0.2/30 dev vpn0
+          sudo ip netns exec "${CLIENT_NS}" ip addr add 10.251.0.2/30 dev sys0
           sudo ip netns exec "${CLIENT_NS}" ip link set vpn0 up
           sudo ip netns exec "${CLIENT_NS}" ip link set sys0 up
-          sudo ip netns exec "${CLIENT_NS}" ip route add 198.18.0.0/24 dev sys0 src 198.18.0.3 metric 10
-          sudo ip netns exec "${CLIENT_NS}" ip route add 198.18.0.0/24 dev vpn0 src 198.18.0.2 metric 100
-          sudo ip netns exec "${CLIENT_NS}" ip route add default dev sys0 metric 10
-          sudo ip netns exec "${CLIENT_NS}" ip route add default dev vpn0 metric 100
+          sudo ip netns exec "${CLIENT_NS}" ip route add default via 10.251.0.1 dev sys0 metric 10
+          sudo ip netns exec "${CLIENT_NS}" ip route add default via 10.250.0.1 dev vpn0 metric 100
 
           sudo ip netns exec "${SINK_NS}" ip link set lo up
-          sudo ip netns exec "${SINK_NS}" ip link add br0 type bridge
-          sudo ip netns exec "${SINK_NS}" ip link set agp-vpnp master br0
-          sudo ip netns exec "${SINK_NS}" ip link set agp-sysp master br0
+          sudo ip netns exec "${SINK_NS}" ip addr add 203.0.113.10/32 dev lo
+          sudo ip netns exec "${SINK_NS}" ip addr add 10.250.0.1/30 dev agp-vpnp
+          sudo ip netns exec "${SINK_NS}" ip addr add 10.251.0.1/30 dev agp-sysp
           sudo ip netns exec "${SINK_NS}" ip link set agp-vpnp up
           sudo ip netns exec "${SINK_NS}" ip link set agp-sysp up
-          sudo ip netns exec "${SINK_NS}" ip addr add 198.18.0.1/24 dev br0
-          sudo ip netns exec "${SINK_NS}" ip link set br0 up
 
           cat >/tmp/agp-source-server.py <<'PY'
           from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -126,7 +123,7 @@ jobs:
               def log_message(self, fmt, *args):
                   pass
 
-          HTTPServer(("198.18.0.1", 18080), Handler).serve_forever()
+          HTTPServer(("203.0.113.10", 18080), Handler).serve_forever()
           PY
 
           sudo ip netns exec "${SINK_NS}" python3 -u /tmp/agp-source-server.py \
@@ -135,26 +132,26 @@ jobs:
 
           for _ in $(seq 1 30); do
             if sudo ip netns exec "${SINK_NS}" curl --noproxy '*' -fsS \
-              http://198.18.0.1:18080/ >/dev/null 2>&1; then
+              http://203.0.113.10:18080/ >/dev/null 2>&1; then
               break
             fi
             sleep 0.1
           done
           sudo ip netns exec "${SINK_NS}" curl --noproxy '*' -fsS \
-            http://198.18.0.1:18080/ >/dev/null
+            http://203.0.113.10:18080/ >/dev/null
 
           echo '--- client routes before Agent Tunnel ---'
           sudo ip netns exec "${CLIENT_NS}" ip -4 route
-          echo '--- sink links ---'
+          echo '--- sink addresses ---'
           sudo ip netns exec "${SINK_NS}" ip -4 addr
 
           sudo ip netns exec "${CLIENT_NS}" env \
             AGP_LINUX_TUN_SMOKE=1 \
             AGP_SINGBOX_BIN="$AGP_SINGBOX_BIN" \
             AGP_TEST_VPN_INTERFACE=vpn0 \
-            AGP_EGRESS_PROBE_URL=http://198.18.0.1:18080/ \
-            AGP_EXPECT_VPN_SOURCE=198.18.0.2 \
-            AGP_EXPECT_SYSTEM_SOURCE=198.18.0.3 \
+            AGP_EGRESS_PROBE_URL=http://203.0.113.10:18080/ \
+            AGP_EXPECT_VPN_SOURCE=10.250.0.2 \
+            AGP_EXPECT_SYSTEM_SOURCE=10.251.0.2 \
             /tmp/antigraviti-proxi-proxy.test \
             -test.run '^TestLinuxAgentTunnelRuntimeSmoke$' -test.v
 
