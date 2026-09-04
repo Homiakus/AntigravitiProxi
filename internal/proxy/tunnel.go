@@ -76,13 +76,15 @@ func (m *Manager) AgentTunnelPrivilegeHint() string {
 	case "windows":
 		return "Agent Tunnel creates a system TUN interface and normally requires AntigravitiProxi to run as Administrator."
 	case "linux":
-		return "Agent Tunnel requires root or CAP_NET_ADMIN/CAP_NET_RAW for TUN and route management."
+		return "Agent Tunnel requires root or CAP_NET_ADMIN/CAP_NET_RAW for TUN and route management. Prefer granting capabilities to the managed sing-box binary instead of running the whole desktop app as root."
 	default:
 		return "Agent Tunnel is supported only on Windows and Linux."
 	}
 }
 
 // StopAndWait switches modes safely without racing the sing-box wait goroutine.
+// Linux first sends SIGTERM so sing-box can remove nftables/routes cleanly; if
+// it does not exit before the caller's deadline we force-kill it as a fallback.
 func (m *Manager) StopAndWait(ctx context.Context) error {
 	if err := m.Stop(); err != nil {
 		return err
@@ -95,6 +97,12 @@ func (m *Manager) StopAndWait(ctx context.Context) error {
 		}
 		select {
 		case <-ctx.Done():
+			m.mu.Lock()
+			cmd := m.cmd
+			m.mu.Unlock()
+			if cmd != nil && cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
 			return ctx.Err()
 		case <-ticker.C:
 		}
@@ -181,14 +189,15 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	}
 
 	tunInbound := map[string]any{
-		"type":         "tun",
-		"tag":          agentTunnelTag,
-		"address":      []string{"172.31.255.1/30", "fdfe:dcba:9876::1/126"},
-		"mtu":          1500,
-		"auto_route":   true,
-		"strict_route": options.StrictRoute,
-		"dns_mode":     "hijack",
-		"stack":        "system",
+		"type":           "tun",
+		"tag":            agentTunnelTag,
+		"interface_name": "antigravity-tun",
+		"address":        []string{"172.31.255.1/30", "fdfe:dcba:9876::1/126"},
+		"mtu":            1500,
+		"auto_route":     true,
+		"strict_route":   options.StrictRoute,
+		"dns_mode":       "hijack",
+		"stack":          "system",
 		"route_exclude_address": []string{
 			"127.0.0.0/8",
 			"10.0.0.0/8",
