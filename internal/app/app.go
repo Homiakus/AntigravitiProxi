@@ -43,16 +43,19 @@ type Server struct {
 }
 
 type Status struct {
-	OS                 string               `json:"os"`
-	Arch               string               `json:"arch"`
-	ProxyRunning       bool                 `json:"proxy_running"`
-	ProxyURL           string               `json:"proxy_url"`
-	SOCKSURL           string               `json:"socks_url"`
-	SingBoxPath        string               `json:"sing_box_path,omitempty"`
-	SingBoxVersion     string               `json:"sing_box_version,omitempty"`
-	AntigravityPath    string               `json:"antigravity_path,omitempty"`
-	Settings           Settings             `json:"settings"`
-	Interfaces         []platform.Interface `json:"interfaces"`
+	OS                   string               `json:"os"`
+	Arch                 string               `json:"arch"`
+	ProxyRunning         bool                 `json:"proxy_running"`
+	ProxyURL             string               `json:"proxy_url"`
+	SOCKSURL             string               `json:"socks_url"`
+	SingBoxPath          string               `json:"sing_box_path,omitempty"`
+	SingBoxVersion       string               `json:"sing_box_version,omitempty"`
+	AntigravityPath      string               `json:"antigravity_path,omitempty"`
+	AgentTunnelActive    bool                 `json:"agent_tunnel_active"`
+	AgentTunnelSupported bool                 `json:"agent_tunnel_supported"`
+	AgentTunnelHint      string               `json:"agent_tunnel_hint,omitempty"`
+	Settings             Settings             `json:"settings"`
+	Interfaces           []platform.Interface `json:"interfaces"`
 }
 
 func New() (*Server, error) {
@@ -117,7 +120,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/status", s.handleStatus)
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnostics)
+	mux.HandleFunc("GET /api/agent-doctor", s.handleAgentDoctor)
 	mux.HandleFunc("GET /api/logs", s.handleLogs)
+
 	mux.HandleFunc("POST /api/config", s.requireCSRF(s.handleConfig))
 	mux.HandleFunc("POST /api/actions/install", s.requireCSRF(s.handleInstall))
 	mux.HandleFunc("POST /api/actions/start", s.requireCSRF(s.handleStart))
@@ -128,6 +133,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/actions/hosts/enable", s.requireCSRF(s.handleHostsEnable))
 	mux.HandleFunc("POST /api/actions/hosts/disable", s.requireCSRF(s.handleHostsDisable))
 	mux.HandleFunc("POST /api/actions/safe", s.requireCSRF(s.handleSafeMode))
+	mux.HandleFunc("POST /api/actions/tunnel/start", s.requireCSRF(s.handleTunnelStart))
+	mux.HandleFunc("POST /api/actions/tunnel/stop", s.requireCSRF(s.handleTunnelStop))
+	mux.HandleFunc("POST /api/actions/tunnel/launch", s.requireCSRF(s.handleTunnelLaunch))
 
 	staticFS, err := fs.Sub(webui.FS, "static")
 	if err != nil {
@@ -135,12 +143,9 @@ func (s *Server) Handler() http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(staticFS))
 
-	// IMPORTANT: do not rewrite "/" to "/index.html" here.
-	// net/http.FileServer intentionally redirects any path ending in
-	// "/index.html" to "./". Rewriting the root request to /index.html
-	// therefore creates an infinite loop:
-	//     / -> /index.html -> ./ -> / -> ...
-	// FileServer already serves index.html automatically for a directory root.
+	// FileServer already serves index.html for the directory root. Rewriting
+	// "/" to "/index.html" would trigger FileServer's canonical redirect and
+	// create a redirect loop.
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{
 			Name:     "agp_csrf",
@@ -190,16 +195,19 @@ func decodeJSON(r *http.Request, v any) error {
 func (s *Server) status(ctx context.Context) Status {
 	ifaces, _ := platform.Interfaces()
 	return Status{
-		OS:              runtime.GOOS,
-		Arch:            runtime.GOARCH,
-		ProxyRunning:    s.pm.Running(),
-		ProxyURL:        s.pm.HTTPProxyURL(),
-		SOCKSURL:        "socks5://" + s.pm.SOCKSProxyAddr(),
-		SingBoxPath:     s.pm.Find(),
-		SingBoxVersion:  s.pm.Version(ctx),
-		AntigravityPath: antigravity.FindExecutable(),
-		Settings:        s.Settings(),
-		Interfaces:      ifaces,
+		OS:                   runtime.GOOS,
+		Arch:                 runtime.GOARCH,
+		ProxyRunning:         s.pm.Running(),
+		ProxyURL:             s.pm.HTTPProxyURL(),
+		SOCKSURL:             "socks5://" + s.pm.SOCKSProxyAddr(),
+		SingBoxPath:          s.pm.Find(),
+		SingBoxVersion:       s.pm.Version(ctx),
+		AntigravityPath:      antigravity.FindExecutable(),
+		AgentTunnelActive:    s.pm.AgentTunnelActive(),
+		AgentTunnelSupported: s.pm.AgentTunnelSupported(),
+		AgentTunnelHint:      s.pm.AgentTunnelPrivilegeHint(),
+		Settings:             s.Settings(),
+		Interfaces:           ifaces,
 	}
 }
 
@@ -237,6 +245,13 @@ func (s *Server) handleDiagnostics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, d)
+}
+
+func (s *Server) handleAgentDoctor(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
+	defer cancel()
+	report := antigravity.AgentDoctor(ctx)
+	writeJSON(w, report)
 }
 
 func tail(path string, n int) string {
@@ -294,6 +309,14 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "settings": cur})
 }
 
+func (s *Server) ensureSingBox(ctx context.Context) error {
+	if s.pm.Find() != "" {
+		return nil
+	}
+	_, err := s.pm.Install(ctx)
+	return err
+}
+
 func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
@@ -309,18 +332,16 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	if s.pm.Find() == "" {
-		if _, err := s.pm.Install(ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if err := s.ensureSingBox(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	if err := s.pm.Start(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	time.Sleep(700 * time.Millisecond)
-	writeJSON(w, map[string]any{"ok": s.pm.Running(), "proxy": s.pm.HTTPProxyURL()})
+	writeJSON(w, map[string]any{"ok": s.pm.Running(), "proxy": s.pm.HTTPProxyURL(), "mode": "safe-proxy"})
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -399,15 +420,17 @@ func (s *Server) handleHostsDisable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+// SAFE MODE remains the low-impact first layer. It does not create a TUN and
+// therefore does not change system routes. Use Agent Tunnel only when the IDE
+// signs in successfully but the actual agent execution path still bypasses
+// HTTP_PROXY.
 func (s *Server) handleSafeMode(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
 
-	if s.pm.Find() == "" {
-		if _, err := s.pm.Install(ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if err := s.ensureSingBox(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 	if !s.pm.Running() {
 		if err := s.pm.Start(ctx); err != nil {
@@ -421,14 +444,123 @@ func (s *Server) handleSafeMode(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.events.publish("warn", "endpoint override: "+err.Error())
 	}
-
 	if err := antigravity.LaunchWithProxy("", s.pm.HTTPProxyURL(), "socks5://"+s.pm.SOCKSProxyAddr()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	s.events.publish("info", "SAFE MODE completed: proxy is process-only; system proxy untouched")
-	writeJSON(w, map[string]any{"ok": true, "settings_files": files})
+	writeJSON(w, map[string]any{"ok": true, "settings_files": files, "mode": "safe-proxy"})
+}
+
+func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
+	defer cancel()
+
+	if !s.pm.AgentTunnelSupported() {
+		http.Error(w, s.pm.AgentTunnelPrivilegeHint(), http.StatusNotImplemented)
+		return
+	}
+	if strings.TrimSpace(s.Settings().VPNInterface) == "" {
+		http.Error(w, "Agent Tunnel requires selecting and saving a VPN interface first", http.StatusBadRequest)
+		return
+	}
+	if err := s.ensureSingBox(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if err := s.pm.StopAndWait(ctx); err != nil {
+		http.Error(w, "stop existing proxy before Agent Tunnel: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := s.pm.StartAgentTunnel(ctx); err != nil {
+		s.events.publish("error", "Agent Tunnel start failed: "+err.Error())
+		http.Error(w, err.Error()+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
+		return
+	}
+
+	time.Sleep(1200 * time.Millisecond)
+	if !s.pm.Running() {
+		errText := tail(s.pm.ErrPath(), 80)
+		if errText == "" {
+			errText = "sing-box exited before the health check"
+		}
+		http.Error(w, errText+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
+		return
+	}
+
+	s.events.publish("warn", "AGENT TUNNEL active: Antigravity traffic is process-routed through the selected VPN; unrelated apps use system-direct")
+	writeJSON(w, map[string]any{
+		"ok":              true,
+		"mode":            "agent-tunnel",
+		"active":          s.pm.AgentTunnelActive(),
+		"vpn_interface":   s.Settings().VPNInterface,
+		"privilege_hint":  s.pm.AgentTunnelPrivilegeHint(),
+		"local_proxy":     s.pm.HTTPProxyURL(),
+		"system_proxy_set": false,
+	})
+}
+
+func (s *Server) handleTunnelStop(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	if err := s.pm.StopAndWait(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.events.publish("info", "Agent Tunnel stopped; system routes released by sing-box")
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) handleTunnelLaunch(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
+	defer cancel()
+
+	if !s.pm.AgentTunnelActive() {
+		if !s.pm.AgentTunnelSupported() {
+			http.Error(w, s.pm.AgentTunnelPrivilegeHint(), http.StatusNotImplemented)
+			return
+		}
+		if strings.TrimSpace(s.Settings().VPNInterface) == "" {
+			http.Error(w, "select and save a VPN interface before Agent Tunnel", http.StatusBadRequest)
+			return
+		}
+		if err := s.ensureSingBox(ctx); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.pm.StopAndWait(ctx); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if err := s.pm.StartAgentTunnel(ctx); err != nil {
+			http.Error(w, err.Error()+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
+			return
+		}
+		time.Sleep(1200 * time.Millisecond)
+	}
+
+	files, err := antigravity.ForceProductionEndpoint()
+	if err != nil {
+		s.events.publish("warn", "endpoint override: "+err.Error())
+	}
+
+	// Keep process proxy variables as a belt-and-suspenders layer. Components
+	// that honor them use the mixed proxy; components that ignore them are still
+	// captured by the TUN process-routing layer.
+	if err := antigravity.LaunchWithProxy("", s.pm.HTTPProxyURL(), "socks5://"+s.pm.SOCKSProxyAddr()); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.events.publish("info", "Antigravity launched in AGENT TUNNEL mode")
+	writeJSON(w, map[string]any{
+		"ok":             true,
+		"mode":           "agent-tunnel",
+		"settings_files": files,
+		"tunnel_active":  s.pm.AgentTunnelActive(),
+	})
 }
 
 func (s *Server) Serve(ctx context.Context) error {
