@@ -29,9 +29,7 @@ type AgentTunnelOptions struct {
 
 func DefaultAgentTunnelOptions() AgentTunnelOptions {
 	// Linux must actually bring ordinary local TCP/UDP connections through the
-	// TUN before process_name/process_path policy can be authoritative. With
-	// auto_redirect enabled, strict_route=false permits some host routes / bound
-	// sockets to bypass sing-box at the kernel layer. We deliberately enable
+	// TUN before process_name/process_path policy can be authoritative. We use
 	// strict routing on Linux and prove the negative invariant in CI: an
 	// unrelated process still exits through system-direct. Windows keeps the
 	// less intrusive default because strict_route can conflict with desktop
@@ -87,7 +85,7 @@ func (m *Manager) AgentTunnelPrivilegeHint() string {
 	case "windows":
 		return "Agent Tunnel creates a system TUN interface and normally requires AntigravitiProxi to run as Administrator."
 	case "linux":
-		return "Agent Tunnel requires root or CAP_NET_ADMIN/CAP_NET_RAW for TUN and route management. Prefer granting capabilities to the managed sing-box binary instead of running the whole desktop app as root."
+		return "Agent Tunnel requires a TUN-capable helper. For non-root operation grant managed sing-box CAP_NET_ADMIN,CAP_NET_RAW,CAP_SYS_PTRACE,CAP_DAC_READ_SEARCH so it can manage routes and attribute sockets to Antigravity processes."
 	default:
 		return "Agent Tunnel is supported only on Windows and Linux."
 	}
@@ -221,10 +219,14 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 		},
 	}
 	if runtime.GOOS == "linux" {
-		// auto_redirect is the preferred Linux path. Combined with strict_route
-		// for Agent Tunnel it ensures policy is evaluated before a normal host
-		// default route can silently bypass process attribution.
-		tunInbound["auto_redirect"] = true
+		// Do NOT enable auto_redirect here. In sing-box 1.14 its fallback ip-rule
+		// is intentionally checked after Linux main/default rules, so a valid host
+		// default route can bypass the TUN before process policy is evaluated.
+		// Agent Tunnel needs the opposite invariant: capture first, classify by
+		// process/path second, then return unrelated traffic through system-direct.
+		// Plain auto_route + strict_route gives us that capture model. CI has a
+		// dual-egress test specifically to prevent this from regressing.
+		tunInbound["auto_redirect"] = false
 	}
 
 	// Ordering is intentional. Since sing-box 1.14, routing rules also run in a
