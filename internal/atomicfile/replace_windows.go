@@ -5,6 +5,7 @@ package atomicfile
 import (
 	"fmt"
 	"syscall"
+	"unsafe"
 )
 
 const (
@@ -27,8 +28,8 @@ func replaceFile(oldPath, newPath string) error {
 		return err
 	}
 	r1, _, callErr := moveFileExProc.Call(
-		uintptr(unsafePointer(oldp)),
-		uintptr(unsafePointer(newp)),
+		uintptr(unsafe.Pointer(oldp)),
+		uintptr(unsafe.Pointer(newp)),
 		uintptr(moveFileReplaceExisting|moveFileWriteThrough),
 	)
 	if r1 == 0 {
@@ -43,7 +44,3 @@ func syncDirectory(string) error {
 	// the Go os package, so there is no extra directory operation here.
 	return nil
 }
-
-// unsafePointer is isolated here so the public helper does not expose unsafe
-// usage. syscall pointers are valid for the duration of MoveFileExW.
-func unsafePointer[T any](p *T) unsafe.Pointer { return unsafe.Pointer(p) }
