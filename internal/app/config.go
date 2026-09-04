@@ -37,23 +37,24 @@ func defaultSettings() Settings {
 }
 
 func loadSettings(path string) Settings {
-	s := defaultSettings()
+	defaults := defaultSettings()
+	s := defaults
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return s
 	}
 	_ = json.Unmarshal(b, &s)
 	if s.Listen == "" {
-		s.Listen = "127.0.0.1:48765"
+		s.Listen = defaults.Listen
 	}
 	if s.ProxyHost == "" {
-		s.ProxyHost = "127.0.0.1"
+		s.ProxyHost = defaults.ProxyHost
 	}
 	if s.ProxyPort == 0 {
-		s.ProxyPort = 7890
+		s.ProxyPort = defaults.ProxyPort
 	}
 	if s.DNSProvider == "" {
-		s.DNSProvider = "cloudflare"
+		s.DNSProvider = defaults.DNSProvider
 	}
 	// 1.14.0 is the first stable release used by Agent Tunnel because it adds
 	// the TUN dns_mode controls required for selective secure-DNS handling.
@@ -68,10 +69,25 @@ func loadSettings(path string) Settings {
 			s.TunnelDomainFallback = true
 		}
 	}
+
+	// Network-facing settings fail closed. A stale/manual config may never turn
+	// the control plane or local mixed proxy into a LAN/public listener.
+	if !isLoopbackListen(s.Listen) {
+		s.Listen = defaults.Listen
+	}
+	if !isLoopbackHost(s.ProxyHost) {
+		s.ProxyHost = defaults.ProxyHost
+	}
+	if s.ProxyPort <= 0 || s.ProxyPort > 65535 {
+		s.ProxyPort = defaults.ProxyPort
+	}
 	return s
 }
 
 func saveSettings(path string, s Settings) error {
+	if err := validateSettingsSecurity(s); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
