@@ -19,6 +19,8 @@ jobs:
           cache: true
       - run: go test ./...
       - run: go vet ./...
+      - name: Validate FMEA register and planning links
+        run: go run ./cmd/riskcheck
       - name: Validate Agent Tunnel config with real pinned sing-box
         env:
           AGP_LIVE_SINGBOX_SCHEMA: '1'
@@ -82,8 +84,8 @@ jobs:
 
           # Two independent L3 uplinks. The ordinary host default route prefers
           # sys0. The test destination (203.0.113.10) is reachable only through
-          # a default route, so it cannot bypass TUN merely because of a more
-          # specific pre-existing host/subnet route.
+          # a default route, so it cannot bypass TUN because of a more-specific
+          # pre-existing route.
           sudo ip link add agp-vpn type veth peer name agp-vpnp
           sudo ip link add agp-sys type veth peer name agp-sysp
           sudo ip link set agp-vpn netns "${CLIENT_NS}"
