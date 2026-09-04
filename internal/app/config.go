@@ -2,9 +2,12 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
-	"path/filepath"
+	"strings"
 
+	"github.com/Homiakus/AntigravitiProxi/internal/atomicfile"
 	"github.com/Homiakus/AntigravitiProxi/internal/proxy"
 )
 
@@ -69,12 +72,39 @@ func loadSettings(path string) Settings {
 }
 
 func saveSettings(path string, s Settings) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o600)
+	return atomicfile.Write(path, append(b, '\n'), 0o600)
+}
+
+func validateSettingsSecurity(s Settings) error {
+	if !isLoopbackListen(s.Listen) {
+		return fmt.Errorf("control-plane listen address must be loopback-only, got %q", s.Listen)
+	}
+	if !isLoopbackHost(s.ProxyHost) {
+		return fmt.Errorf("local proxy host must be loopback-only, got %q", s.ProxyHost)
+	}
+	if s.ProxyPort <= 0 || s.ProxyPort > 65535 {
+		return fmt.Errorf("invalid proxy port %d", s.ProxyPort)
+	}
+	return nil
+}
+
+func isLoopbackListen(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return false
+	}
+	return isLoopbackHost(host)
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
