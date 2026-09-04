@@ -53,8 +53,6 @@ func DefaultAgentTunnelOptions() AgentTunnelOptions {
 			"agy.exe",
 			"agy",
 		},
-		// Bundled node/helper processes are caught by installation path instead
-		// of routing every node.exe on the machine.
 		ProcessPathRegex: []string{
 			`(?i).*antigravity.*`,
 			`(?i).*language[_-]?server.*`,
@@ -93,9 +91,6 @@ func (m *Manager) AgentTunnelPrivilegeHint() string {
 	}
 }
 
-// StopAndWait switches modes safely without racing the sing-box wait goroutine.
-// Linux first sends SIGTERM so sing-box can remove routing state cleanly; if it
-// does not exit before the caller's deadline we force-kill it as a fallback.
 func (m *Manager) StopAndWait(ctx context.Context) error {
 	if err := m.Stop(); err != nil {
 		return err
@@ -188,9 +183,6 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 			"strategy": "ipv4_only",
 		},
 	}
-	// auto_detect_interface makes this outbound escape the TUN through the
-	// machine's original default route, preventing loops and preserving normal
-	// behavior for unrelated applications.
 	systemDirect := map[string]any{
 		"type": "direct",
 		"tag":  "system-direct",
@@ -221,21 +213,13 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 		},
 	}
 	if runtime.GOOS == "linux" {
-		// Do NOT enable auto_redirect here. In sing-box 1.14 its fallback ip-rule
-		// is intentionally checked after Linux main/default rules, so a valid host
-		// default route can bypass the TUN before process policy is evaluated.
-		// Agent Tunnel needs the opposite invariant: capture first, classify by
-		// process/path second, then return unrelated traffic through system-direct.
-		// Plain auto_route + strict_route gives us that capture model. CI has a
-		// dual-egress test specifically to prevent this from regressing.
+		// auto_redirect is deliberately disabled. The real dual-egress netns
+		// test proved that its Linux fallback rule can allow the host default
+		// route to win before process classification. Capture first with
+		// auto_route+strict_route, then return unrelated flows via system-direct.
 		tunInbound["auto_redirect"] = false
 	}
 
-	// Ordering is intentional. Since sing-box 1.14, routing rules also run in a
-	// pre-match phase for L3 inbounds. TCP sniffing always stops pre-match because
-	// no payload is available yet. Therefore process rules MUST precede sniff;
-	// otherwise every TCP flow can reach sniff before process attribution and the
-	// selective process policy is not authoritative.
 	routeRules := []any{
 		map[string]any{
 			"inbound":  []string{"local-mixed"},
@@ -304,19 +288,18 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	return atomicfile.Write(path, append(b, '\n'), 0o600)
 }
 
-// StartAgentTunnel accepts an optional options argument to keep compatibility
-// with older callers while allowing the web UI to add strict/domain controls.
-// Startup is transactional at the managed-process boundary: success is not
-// reported until the TUN exists and the mixed listener is proven to belong to
-// the newly started sing-box process. Failed readiness triggers rollback.
+// StartAgentTunnel does not trust a matching binary merely because it exists.
+// The privileged TUN data plane must come from a release whose archive digest
+// was verified and whose installed binary still matches persisted provenance.
+// Startup itself is also transactional at the managed-process boundary.
 func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelOptions) error {
 	if !m.AgentTunnelSupported() {
 		return fmt.Errorf("Agent Tunnel is unsupported on %s", runtime.GOOS)
 	}
 
-	binary, err := m.Install(ctx)
+	binary, err := m.InstallVerified(ctx)
 	if err != nil {
-		return fmt.Errorf("ensure Agent Tunnel sing-box: %w", err)
+		return fmt.Errorf("ensure verified Agent Tunnel sing-box: %w", err)
 	}
 	if err := validateAgentTunnelHost(binary); err != nil {
 		return err
@@ -326,9 +309,6 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 	if len(provided) > 0 {
 		options = provided[0]
 	}
-	// Linux strict routing is not a preference: the dual-egress runtime test
-	// proved it is required for authoritative host-flow capture before process
-	// classification. Do not allow a UI/API false value to reintroduce bypass.
 	if runtime.GOOS == "linux" {
 		options.StrictRoute = true
 	}
