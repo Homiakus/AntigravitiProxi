@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -133,5 +134,33 @@ func TestAgentTunnelCanDisableDomainFallback(t *testing.T) {
 		if _, ok := rule["domain_suffix"]; ok {
 			t.Fatalf("domain fallback rule unexpectedly present: %#v", rule)
 		}
+	}
+}
+
+// CI sets AGP_SINGBOX_BIN to the official pinned binary. Keeping this test
+// optional makes ordinary `go test ./...` fast and offline-friendly while the
+// main branch still validates the generated JSON against sing-box's real
+// schema on every push.
+func TestAgentTunnelConfigAcceptedByRealSingBox(t *testing.T) {
+	bin := os.Getenv("AGP_SINGBOX_BIN")
+	if bin == "" {
+		t.Skip("AGP_SINGBOX_BIN not set")
+	}
+	root := t.TempDir()
+	path := filepath.Join(root, "tunnel.json")
+	cfg := Config{
+		Root:         root,
+		Host:         "127.0.0.1",
+		Port:         17890,
+		VPNInterface: "lo",
+		DNSProvider:  "cloudflare",
+		SingBoxVer:   DefaultSingBoxVersion,
+	}
+	if err := writeAgentTunnelConfig(cfg, path, DefaultAgentTunnelOptions()); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bin, "check", "-c", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("real sing-box rejected Agent Tunnel config: %v\n%s", err, out)
 	}
 }
