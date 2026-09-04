@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"runtime"
 	"strings"
@@ -296,8 +297,12 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 	// Agent Tunnel relies on stable 1.14.0+ TUN DNS controls. Install() is
 	// intentionally called even when some sing-box binary already exists so a
 	// stale managed 1.13.x build is upgraded before config validation.
-	if _, err := m.Install(ctx); err != nil {
+	binary, err := m.Install(ctx)
+	if err != nil {
 		return fmt.Errorf("ensure Agent Tunnel sing-box: %w", err)
+	}
+	if err := validateAgentTunnelHost(binary); err != nil {
+		return err
 	}
 
 	options := DefaultAgentTunnelOptions()
@@ -310,8 +315,19 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 	if m.cmd != nil && m.cmd.Process != nil {
 		return fmt.Errorf("sing-box already started by this process in %s mode; stop it before starting Agent Tunnel", m.mode)
 	}
-	if strings.TrimSpace(m.cfg.VPNInterface) == "" {
+	vpn := strings.TrimSpace(m.cfg.VPNInterface)
+	if vpn == "" {
 		return errors.New("Agent Tunnel requires an explicit VPN interface")
+	}
+	if vpn == "antigravity-tun" {
+		return errors.New("Agent Tunnel cannot use its own TUN interface as the VPN upstream")
+	}
+	iface, err := net.InterfaceByName(vpn)
+	if err != nil {
+		return fmt.Errorf("selected VPN interface %q does not exist: %w", vpn, err)
+	}
+	if iface.Flags&net.FlagUp == 0 {
+		return fmt.Errorf("selected VPN interface %q is down", vpn)
 	}
 	if err := writeAgentTunnelConfig(m.cfg, m.TunnelConfigPath(), options); err != nil {
 		return err
