@@ -53,8 +53,18 @@ func TestAgentTunnelConfigIsProcessAwareAndNonGlobal(t *testing.T) {
 	if tun["dns_mode"] != "hijack" || tun["auto_route"] != true {
 		t.Fatalf("unexpected TUN DNS/route config: %#v", tun)
 	}
-	if runtime.GOOS == "linux" && tun["auto_redirect"] != true {
-		t.Fatal("Linux Agent Tunnel must enable auto_redirect")
+	if runtime.GOOS == "linux" {
+		if tun["strict_route"] != true {
+			t.Fatal("Linux Agent Tunnel must use strict_route so local flows enter the TUN before process classification")
+		}
+		// Deliberate design choice: sing-box 1.14 auto_redirect installs a
+		// fallback ip-rule after Linux main/default, which allowed an ordinary
+		// host default route to bypass our process policy in the dual-egress
+		// runtime test. Keep it disabled until a selective kernel capture design
+		// can prove the same isolation invariant.
+		if tun["auto_redirect"] != false {
+			t.Fatal("Linux Agent Tunnel must keep auto_redirect disabled for authoritative process routing")
+		}
 	}
 
 	outbounds, ok := doc["outbounds"].([]any)
@@ -86,14 +96,25 @@ func TestAgentTunnelConfigIsProcessAwareAndNonGlobal(t *testing.T) {
 	}
 	rules, _ := route["rules"].([]any)
 	foundProcessRule := false
-	for _, raw := range rules {
+	processIndex := -1
+	sniffIndex := -1
+	for i, raw := range rules {
 		rule, _ := raw.(map[string]any)
 		if _, ok := rule["process_name"]; ok && rule["outbound"] == "vpn-direct" {
 			foundProcessRule = true
+			if processIndex < 0 {
+				processIndex = i
+			}
+		}
+		if rule["action"] == "sniff" && sniffIndex < 0 {
+			sniffIndex = i
 		}
 	}
 	if !foundProcessRule {
 		t.Fatal("process_name -> vpn-direct rule missing")
+	}
+	if sniffIndex >= 0 && processIndex >= sniffIndex {
+		t.Fatalf("process policy must precede sniff for sing-box pre-match semantics: process=%d sniff=%d", processIndex, sniffIndex)
 	}
 
 	dns, ok := doc["dns"].(map[string]any)
