@@ -17,21 +17,41 @@ func validateAgentTunnelHost(binary string) error {
 		return nil
 	}
 
-	// Running the whole desktop control plane as root is avoidable. A safer
-	// Linux setup grants only the network capabilities needed by sing-box.
+	// Agent Tunnel does more than create routes. Its core isolation invariant
+	// depends on sing-box resolving local sockets back to the owning process so
+	// process_name/process_path rules can be authoritative. The upstream
+	// sing-box Linux service grants SYS_PTRACE and DAC_READ_SEARCH for exactly
+	// this class of process inspection in addition to TUN capabilities.
+	//
+	// Running the whole desktop control plane as root is avoidable: grant only
+	// the capabilities needed by the managed sing-box helper.
 	if getcap, err := exec.LookPath("getcap"); err == nil && binary != "" {
 		out, _ := exec.Command(getcap, binary).CombinedOutput()
 		caps := strings.ToLower(string(out))
-		hasAdmin := strings.Contains(caps, "cap_net_admin")
-		hasRaw := strings.Contains(caps, "cap_net_raw")
-		if hasAdmin && hasRaw {
+		required := []string{
+			"cap_net_admin",
+			"cap_net_raw",
+			"cap_sys_ptrace",
+			"cap_dac_read_search",
+		}
+		var missing []string
+		for _, capName := range required {
+			if !strings.Contains(caps, capName) {
+				missing = append(missing, capName)
+			}
+		}
+		if len(missing) == 0 {
 			return nil
 		}
-		return fmt.Errorf("Agent Tunnel needs CAP_NET_ADMIN and CAP_NET_RAW on Linux; grant them only to sing-box instead of running the IDE as root: sudo setcap cap_net_admin,cap_net_raw+ep %q", binary)
+		return fmt.Errorf(
+			"Agent Tunnel Linux helper is missing capabilities [%s]; grant only the managed sing-box helper what TUN + process attribution require: sudo setcap cap_net_admin,cap_net_raw,cap_sys_ptrace,cap_dac_read_search+ep %q",
+			strings.Join(missing, ", "), binary,
+		)
 	}
 
-	// Some minimal distributions do not ship getcap. Do not reject a binary
-	// whose file capabilities we cannot inspect; sing-box startup will still be
-	// authoritative and the caller appends the privilege hint to any failure.
-	return nil
+	// Some minimal distributions do not ship getcap. Do not claim readiness
+	// when the process-attribution invariant cannot be verified. A root launch
+	// remains available as a diagnostic fallback, but production setup should
+	// install libcap/getcap and use the capability-scoped helper.
+	return fmt.Errorf("cannot verify Linux capabilities because getcap is unavailable; install libcap/getcap or run as root for diagnosis, then grant cap_net_admin,cap_net_raw,cap_sys_ptrace,cap_dac_read_search to the managed sing-box helper")
 }
