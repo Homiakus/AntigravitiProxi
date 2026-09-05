@@ -22,6 +22,7 @@ const (
 )
 
 type RuntimeConnection struct {
+	Source      string `json:"source,omitempty"`
 	Process     string `json:"process,omitempty"`
 	Outbound    string `json:"outbound,omitempty"`
 	Destination string `json:"destination,omitempty"`
@@ -87,8 +88,9 @@ func (m *Manager) apiSecret() (string, error) {
 // connection-tracker snapshot. We deliberately invoke the same managed binary
 // as a client instead of importing sing-box's unstable daemon protobuf package.
 // In non-terminal mode `sing-box api connection list` emits tab-separated rows,
-// which is a stable CLI contract in 1.14. The secret is passed as an argument
-// only to the child process and is never returned to callers or logs.
+// which is a stable CLI contract in 1.14. Source endpoint evidence is retained
+// so a higher-level attestor can correlate a live connection with OS socket/PID
+// ownership instead of trusting only a process-path string.
 func (m *Manager) RuntimeConnections(ctx context.Context) ([]RuntimeConnection, error) {
 	if !m.ManagedRunning() || m.Mode() != ModeAgentTunnel {
 		return nil, errors.New("Agent Tunnel is not running")
@@ -106,7 +108,7 @@ func (m *Manager) RuntimeConnections(ctx context.Context) ([]RuntimeConnection, 
 		"--url", "http://"+m.APIAddr(),
 		"--secret", secret,
 		"connection", "list",
-		"--columns", "process,outbound,destination,inbound,network",
+		"--columns", "source,process,outbound,destination,inbound,network",
 	)
 	out, err := cmd.Output()
 	if err != nil {
@@ -126,7 +128,7 @@ func parseRuntimeConnections(raw string) ([]RuntimeConnection, error) {
 			continue
 		}
 		cells := strings.Split(line, "\t")
-		if len(cells) != 5 {
+		if len(cells) != 6 {
 			return nil, fmt.Errorf("unexpected sing-box API row %d: got %d columns", lineNo+1, len(cells))
 		}
 		clean := func(v string) string {
@@ -136,11 +138,12 @@ func parseRuntimeConnections(raw string) ([]RuntimeConnection, error) {
 			return v
 		}
 		out = append(out, RuntimeConnection{
-			Process:     clean(cells[0]),
-			Outbound:    clean(cells[1]),
-			Destination: clean(cells[2]),
-			Inbound:     clean(cells[3]),
-			Network:     clean(cells[4]),
+			Source:      clean(cells[0]),
+			Process:     clean(cells[1]),
+			Outbound:    clean(cells[2]),
+			Destination: clean(cells[3]),
+			Inbound:     clean(cells[4]),
+			Network:     clean(cells[5]),
 		})
 	}
 	return out, nil
@@ -148,10 +151,9 @@ func parseRuntimeConnections(raw string) ([]RuntimeConnection, error) {
 
 // AttestAgentRoutes proves the runtime routing decision for live Antigravity
 // connections. This is stronger than static JSON validation: sing-box itself
-// reports the process path and chosen outbound from its connection tracker.
-// It is intentionally named route attestation rather than public-egress
-// attestation: `vpn-direct` plus bind_interface proves the runtime routing
-// decision, while an external public-IP probe remains a separate P1 control.
+// reports the source endpoint, process path and chosen outbound from its
+// connection tracker. Source endpoint evidence is intentionally preserved for
+// the next assurance layer that maps sockets back to concrete PIDs.
 func (m *Manager) AttestAgentRoutes(ctx context.Context) RouteAttestation {
 	r := RouteAttestation{ObservedAt: time.Now().UTC()}
 	connections, err := m.RuntimeConnections(ctx)
