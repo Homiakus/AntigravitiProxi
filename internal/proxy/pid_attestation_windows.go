@@ -27,13 +27,22 @@ func platformRuntimeConnectionOwners(source, network string, candidatePIDs []int
 	if err != nil {
 		return nil, "", fmt.Errorf("netstat -ano -p %s: %w: %s", proto, err, strings.TrimSpace(string(out)))
 	}
+	owners, matches := parseWindowsNetstatOwners(string(out), proto, wantIP, wantPort, candidatePIDs)
+	return owners, fmt.Sprintf("source=%s matched %d netstat row(s) and %d candidate PID(s)", source, matches, len(owners)), nil
+}
+
+// parseWindowsNetstatOwners is intentionally pure so Windows-specific socket
+// ownership can be fixture-tested on a hosted Windows runner. The platform
+// command remains only an evidence collector; all matching semantics live here.
+func parseWindowsNetstatOwners(raw, proto string, wantIP net.IP, wantPort int, candidatePIDs []int) ([]int, int) {
+	proto = strings.ToLower(strings.TrimSpace(proto))
 	candidates := map[int]bool{}
 	for _, pid := range uniqueSortedPositiveInts(candidatePIDs) {
 		candidates[pid] = true
 	}
 	owners := map[int]bool{}
 	matches := 0
-	for _, line := range strings.Split(string(out), "\n") {
+	for _, line := range strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 4 || !strings.EqualFold(fields[0], proto) {
 			continue
@@ -51,7 +60,7 @@ func platformRuntimeConnectionOwners(source, network string, candidatePIDs []int
 			owners[pid] = true
 		}
 	}
-	return sortedIntKeys(owners), fmt.Sprintf("source=%s matched %d netstat row(s) and %d candidate PID(s)", source, matches, len(owners)), nil
+	return sortedIntKeys(owners), matches
 }
 
 func splitWindowsRuntimeSource(source string) (net.IP, int, error) {
