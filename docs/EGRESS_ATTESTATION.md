@@ -24,7 +24,9 @@ The `system-direct` comparison is negative/control evidence. A different observe
 
 ## Current implementation
 
-`internal/proxy/observability.go` exposes `RuntimeConnections` and `AttestAgentRoutes`. Runtime connection evidence includes `source`, `process`, `outbound`, `destination`, `inbound` and `network`. The connection tracker is available only on an authenticated loopback API service. The API secret is randomly generated, stored with owner-only permissions, never returned by the HTTP control plane and never logged.
+`internal/proxy/observability.go` exposes `RuntimeConnections` and `AttestAgentRoutes`. Runtime connection evidence includes `source`, `process`, `outbound`, `destination`, `inbound` and `network`. The connection tracker is available only on an authenticated loopback API service. The API secret is randomly generated, never returned by the HTTP control plane and never logged.
+
+On Unix-like systems the persisted API secret is written as `0600` and this is regression-tested. On Windows, POSIX `FileMode` bits are not valid ACL evidence: NTFS access is inherited from the per-user application-data directory and a file may report `0666` through Go while still being ACL-restricted. Native Windows security-descriptor verification/hardening remains a separate security task; tests must not pretend POSIX mode bits prove a Windows DACL.
 
 `internal/proxy/pid_attestation.go` exposes `AttestAgentPIDRoutes`. The caller supplies PIDs from the live Antigravity process tree. Every live connection is joined against OS socket ownership instead of assuming that a familiar executable path is sufficient identity evidence.
 
@@ -46,6 +48,19 @@ The observers are queried concurrently through the managed local proxy. At least
 After the first successful VPN-path observation, the same provider is queried with an HTTP transport whose `Proxy` is explicitly `nil`. This prevents inherited `HTTP_PROXY` / `HTTPS_PROXY` settings from contaminating the control path.
 
 `internal/app/attestation.go` composes process-tree, route-decision, PID/socket and external-egress evidence into an assurance state: `idle`, `partial`, `verified` or `degraded`. External observer unavailability is classified as incomplete evidence rather than proof of a routing defect; unexpected or ambiguous routing evidence is degraded.
+
+The composed evidence is exposed read-only at `GET /api/attestation`. The endpoint reports whether external evidence came from cache and includes `egress_fresh_until`. The Web UI renders the assurance state, attributable PID ratio, egress availability and evidence age instead of conflating transport readiness with strong route verification.
+
+## Bounded external-evidence cache
+
+Public observers are not queried on every UI refresh. `internal/app/attestation_cache.go` keeps a short-lived in-memory cache keyed by the managed sing-box PID and selected VPN interface:
+
+- successful external evidence: **15 s TTL**;
+- unavailable/failed external evidence: **3 s TTL**.
+
+A different managed PID or VPN interface cannot reuse the entry. `egress_cached` and `egress_fresh_until` make this explicit to callers. The cache is intentionally memory-only; public IP evidence is not persisted.
+
+The key is an identity/freshness guard, not a proof that the VPN did not reconnect beneath the same interface. Therefore successful evidence remains deliberately short-lived and can never become durable health state.
 
 ## Privacy contract
 
@@ -95,15 +110,25 @@ probe PID
 
 This PID-level proof passes in the privileged Linux runtime job together with TUN startup/cleanup, PID/path routing, crash recovery, reserved route/rule ownership and authenticated connection-tracker access.
 
+## Windows evidence
+
+Windows now has two levels of native-runner evidence:
+
+1. parser fixtures verify exact endpoint matching, candidate filtering, IPv4/IPv6 parsing and ambiguous candidate ownership;
+2. a Windows runner opens a real TCP socket and verifies that `netstat -ano` attributes that live local endpoint back to the creating process PID.
+
+This proves the current ownership backend behaves correctly on Windows itself, but it is still weaker than the Linux end-to-end Agent Tunnel fixture because it does not yet run the complete privileged TUN + sing-box + remote-observer chain on Windows.
+
 ## Remaining assurance gaps
 
-Linux now has deterministic end-to-end PID/socket/outbound/external-egress proof. Windows has the implementation for exact local endpoint -> `netstat -ano` -> candidate PID correlation and cross-build coverage, but still needs a privileged/real-network Windows runtime fixture before the same assurance level can be claimed there.
+Linux now has deterministic end-to-end PID/socket/outbound/external-egress proof. Windows has real socket-to-PID runtime evidence but still needs a complete Agent Tunnel runtime fixture before equivalent end-to-end assurance can be claimed there.
 
-The next architecture step is not another routing heuristic. It is **continuous assurance orchestration**:
+Next steps:
 
-- expose the composed attestation through the local control-plane API and Advanced UI;
-- cache evidence with timestamps/expiry rather than probing public observers on every status refresh;
-- make `verified` a separate assurance dimension instead of overloading basic TUN health;
-- block a strong “verified egress” state on unknown helpers, ambiguous ownership or unexpected outbound;
-- add a Windows runtime fixture and migrate Windows PID ownership from command parsing to native IP Helper APIs if this materially improves determinism;
-- add independent IPv4/IPv6 and UDP/QUIC evidence before closing R-005.
+- add a privileged Windows Agent Tunnel runtime fixture with a controlled remote observer;
+- migrate Windows ownership from `netstat -ano` parsing to native IP Helper APIs if it materially improves determinism and failure classification;
+- add explicit Windows security-descriptor verification/hardening for persisted secrets and sensitive runtime files;
+- keep `verified` as a separate assurance dimension instead of overloading basic TUN health;
+- block strong assurance on unknown helpers, ambiguous ownership or unexpected outbound;
+- add independent IPv4/IPv6 and UDP/QUIC evidence before closing R-005;
+- add cache invalidation hooks to lifecycle transitions in addition to the PID/VPN cache key, mainly to make state transitions auditable rather than relying only on short TTL.
