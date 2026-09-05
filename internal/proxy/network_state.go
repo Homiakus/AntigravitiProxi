@@ -46,18 +46,18 @@ type OwnedNetworkDelta struct {
 }
 
 type TunnelStateJournal struct {
-	SchemaVersion int                `json:"schema_version"`
-	Phase         string             `json:"phase"`
-	OperationID   string             `json:"operation_id"`
-	PID           int                `json:"pid,omitempty"`
-	VPNInterface  string             `json:"vpn_interface"`
-	CreatedAt     time.Time          `json:"created_at"`
-	UpdatedAt     time.Time          `json:"updated_at"`
-	Before        NetworkSnapshot    `json:"before"`
-	Active        *NetworkSnapshot   `json:"active,omitempty"`
-	Owned         OwnedNetworkDelta  `json:"owned"`
-	LastError     string             `json:"last_error,omitempty"`
-	Recovery      []string           `json:"recovery,omitempty"`
+	SchemaVersion int               `json:"schema_version"`
+	Phase         string            `json:"phase"`
+	OperationID   string            `json:"operation_id"`
+	PID           int               `json:"pid,omitempty"`
+	VPNInterface  string            `json:"vpn_interface"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
+	Before        NetworkSnapshot   `json:"before"`
+	Active        *NetworkSnapshot  `json:"active,omitempty"`
+	Owned         OwnedNetworkDelta `json:"owned"`
+	LastError     string            `json:"last_error,omitempty"`
+	Recovery      []string          `json:"recovery,omitempty"`
 }
 
 type NetworkJournalStatus struct {
@@ -114,6 +114,9 @@ func (m *Manager) beginTunnelTransaction(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("capture pre-tunnel network state: %w", err)
 	}
+	if err := preflightPlatformNetworkOwnership(before); err != nil {
+		return fmt.Errorf("network ownership preflight: %w", err)
+	}
 	now := time.Now().UTC()
 	j := &TunnelStateJournal{
 		SchemaVersion: networkStateSchema,
@@ -123,9 +126,7 @@ func (m *Manager) beginTunnelTransaction(ctx context.Context) error {
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		Before:        before,
-		Owned: OwnedNetworkDelta{
-			TunnelInterface: agentTunName,
-		},
+		Owned:         reservedPlatformOwnership(),
 	}
 	return m.writeTunnelJournal(j)
 }
@@ -145,7 +146,7 @@ func (m *Manager) markTunnelActive(ctx context.Context) error {
 	j.Phase = "active"
 	j.PID = m.ManagedPID()
 	j.Active = &active
-	j.Owned = deriveOwnedNetworkDelta(j.Before, active)
+	j.Owned = mergeOwnedNetworkDelta(j.Owned, deriveOwnedNetworkDelta(j.Before, active))
 	j.Owned.TunnelInterface = agentTunName
 	return m.writeTunnelJournal(j)
 }
@@ -175,11 +176,12 @@ func (m *Manager) persistCleanJournal(j *TunnelStateJournal) error {
 	return nil
 }
 
-// RecoverStaleNetworkState is deliberately conservative: it only removes
-// resources that can be attributed to the previous journal. New route tables
-// and rule priorities are auto-recovered only when they did not exist in the
-// captured baseline. An unknown pre-existing TUN or live previous helper makes
-// recovery fail closed instead of deleting arbitrary host networking state.
+// RecoverStaleNetworkState is deliberately conservative. Linux first reserves
+// and preflights an explicit iproute2 table/rule namespace before any mutation;
+// the journal therefore already knows what may be cleaned even if the process
+// dies before active evidence is persisted. Observed before/after differences
+// are merged only as additional evidence. Unknown TUNs or live previous helper
+// PIDs always fail closed.
 func (m *Manager) RecoverStaleNetworkState(ctx context.Context) error {
 	j, err := m.loadTunnelJournal()
 	if err != nil {
@@ -199,10 +201,8 @@ func (m *Manager) RecoverStaleNetworkState(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("capture stale network state: %w", err)
 	}
-	// If startup died before activation evidence was persisted, reconstruct the
-	// conservative owned delta from the durable baseline and current state.
 	if j.Active == nil {
-		j.Owned = deriveOwnedNetworkDelta(j.Before, current)
+		j.Owned = mergeOwnedNetworkDelta(j.Owned, deriveOwnedNetworkDelta(j.Before, current))
 		j.Owned.TunnelInterface = agentTunName
 	}
 	j.Phase = "recovering"
