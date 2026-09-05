@@ -4,8 +4,10 @@ package proxy
 
 import (
 	"net"
+	"os"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestParseWindowsNetstatOwnersExactEndpointAndCandidateFilter(t *testing.T) {
@@ -65,4 +67,68 @@ func TestSplitWindowsRuntimeSourceIPv4AndIPv6Zone(t *testing.T) {
 			t.Fatalf("splitWindowsRuntimeSource(%q) unexpectedly succeeded", bad)
 		}
 	}
+}
+
+func TestWindowsLiveSocketOwnershipFindsCurrentPID(t *testing.T) {
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	accepted := make(chan net.Conn, 1)
+	acceptErr := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		accepted <- conn
+	}()
+
+	client, err := net.DialTimeout("tcp4", ln.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var server net.Conn
+	select {
+	case server = <-accepted:
+		defer server.Close()
+	case err := <-acceptErr:
+		t.Fatalf("accept: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("accept timeout")
+	}
+
+	pid := os.Getpid()
+	source := client.LocalAddr().String()
+	deadline := time.Now().Add(3 * time.Second)
+	var lastDetail string
+	for {
+		owners, detail, err := platformRuntimeConnectionOwners(source, "tcp", []int{pid})
+		lastDetail = detail
+		if err == nil && intSliceContains(owners, pid) {
+			t.Logf("live Windows socket ownership proven: pid=%d source=%s detail=%s", pid, source, detail)
+			return
+		}
+		if time.Now().After(deadline) {
+			if err != nil {
+				t.Fatalf("live socket ownership failed: %v detail=%s", err, lastDetail)
+			}
+			t.Fatalf("live socket ownership did not resolve pid=%d source=%s detail=%s", pid, source, lastDetail)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func intSliceContains(values []int, want int) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
