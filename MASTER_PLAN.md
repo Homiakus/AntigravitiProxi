@@ -69,6 +69,7 @@
 - [x] Native Windows CI открывает реальный TCP socket и доказывает exact local endpoint → `netstat -ano` → PID создающего процесса; parser fixtures отдельно покрывают IPv4/IPv6, candidate filtering и ambiguous ownership.
 - [x] Composed assurance опубликован read-only через `GET /api/attestation`; Web UI показывает `idle/partial/verified/degraded`, PID-route evidence, external egress и возраст evidence.
 - [x] External-egress evidence имеет bounded in-memory cache: success TTL 15 s, failure TTL 3 s, key = managed sing-box PID + VPN interface; API явно возвращает `egress_cached` и `egress_fresh_until`.
+- [x] Assurance cache инвалидируется на data-plane reconfigure/start/stop/mode-switch/rollback boundaries и публикует локальное audit-event, поэтому старое внешнее evidence не переживает управляемую смену транспортного состояния.
 
 ## P0 — уже реализовано
 
@@ -147,7 +148,7 @@
 - [x] Evidence-based health snapshot with explicit `idle / healthy / degraded`; dimensions include `managed_process`, `mixed_listener_owned`, `tun`, `vpn_interface`, `network_journal`. **[R-014, R-022, R-026]**
 - [x] Backend assurance composition implemented for process-tree + sing-box route + PID/socket ownership + external egress with `idle / partial / verified / degraded` semantics. **[R-002, R-014, R-015]**
 - [x] Expose/cache composed assurance through read-only `GET /api/attestation` and Web UI; external observer work is bounded by 15 s success / 3 s failure TTL, and callers receive explicit cache/freshness metadata. **[R-014, R-015, R-019]**
-- [ ] Add explicit lifecycle invalidation hooks for assurance cache on data-plane start/stop/reconfigure in addition to PID/VPN keying and short TTL. **[R-014, R-015]**
+- [x] Explicit lifecycle invalidation clears cached external-egress evidence on data-plane reconfigure, managed stop, Agent Tunnel start/stop/restart and startup rollback; invalidation is visible in local event history. **[R-014, R-015]**
 - [ ] Extend lifecycle state machine to explicit transient states: `installing → starting → stopping → recovering`, with transition invariants and timestamps. **[R-001, R-014]**
 - [ ] Add independent health dimensions: `route`, `dns_v4`, `dns_v6`, `egress`, `agent_process`, `backend`. **[R-005, R-011, R-014, R-015]**
 - [ ] Operation IDs and cancellation for long-running web actions. **[R-001, R-014]**
