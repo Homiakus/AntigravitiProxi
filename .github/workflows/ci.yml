@@ -55,7 +55,7 @@ jobs:
         run: |
           go test -c ./internal/proxy -o /tmp/antigraviti-proxi-proxy.test
           go build -trimpath -o /tmp/agp-egress-probe ./cmd/egress-probe
-      - name: Real TUN + PID/path-aware dual-egress isolation in netns
+      - name: Real TUN dual-egress, crash recovery, and observability in netns
         shell: bash
         run: |
           set -euo pipefail
@@ -158,7 +158,7 @@ jobs:
             AGP_EXPECT_VPN_SOURCE=10.250.0.2 \
             AGP_EXPECT_SYSTEM_SOURCE=10.251.0.2 \
             /tmp/antigraviti-proxi-proxy.test \
-            -test.run '^TestLinuxAgentTunnelRuntimeSmoke$' -test.v
+            -test.run '^(TestLinuxAgentTunnelRuntimeSmoke|TestLinuxAgentTunnelCrashRecoveryPreservesUnrelatedRoutingState|TestLinuxAgentTunnelObservabilityRuntime)$' -test.v
 
   build:
     runs-on: ubuntu-latest
