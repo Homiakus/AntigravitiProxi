@@ -20,19 +20,23 @@ const (
 )
 
 type NetworkAttestationReport struct {
-	State       AssuranceState                `json:"state"`
-	ObservedAt  time.Time                     `json:"observed_at"`
-	ProcessTree antigravity.ProcessTreeReport `json:"process_tree"`
-	Route       proxy.RouteAttestation        `json:"route"`
-	PIDRoute    proxy.PIDRouteAttestation     `json:"pid_route"`
-	Egress      proxy.PublicEgressAttestation `json:"egress"`
-	Detail      string                        `json:"detail"`
+	State            AssuranceState                `json:"state"`
+	ObservedAt       time.Time                     `json:"observed_at"`
+	ProcessTree      antigravity.ProcessTreeReport `json:"process_tree"`
+	Route            proxy.RouteAttestation        `json:"route"`
+	PIDRoute         proxy.PIDRouteAttestation     `json:"pid_route"`
+	Egress           proxy.PublicEgressAttestation `json:"egress"`
+	EgressCached     bool                          `json:"egress_cached"`
+	EgressFreshUntil *time.Time                    `json:"egress_fresh_until,omitempty"`
+	Detail           string                        `json:"detail"`
 }
 
 // networkAttestation composes independent evidence instead of treating one
 // green signal as proof of the whole transport path. Public observers are only
 // queried when there is an attributable live Agent connection, avoiding
 // unnecessary privacy-sensitive/network-dependent work while the IDE is idle.
+// External evidence is short-lived and its cache/freshness is surfaced to the
+// caller so UI/automation never mistakes a cached observation for a new probe.
 func (s *Server) networkAttestation(ctx context.Context) NetworkAttestationReport {
 	r := NetworkAttestationReport{ObservedAt: time.Now().UTC()}
 	tunnelActive := s.pm.Mode() == proxy.ModeAgentTunnel && s.pm.AgentTunnelActive()
@@ -51,7 +55,12 @@ func (s *Server) networkAttestation(ctx context.Context) NetworkAttestationRepor
 	r.Route = s.pm.AttestAgentRoutes(ctx)
 	r.PIDRoute = s.pm.AttestAgentPIDRoutes(ctx, pids)
 	if len(r.PIDRoute.ActiveCandidatePIDs) > 0 {
-		r.Egress = s.pm.AttestPublicEgress(ctx)
+		var freshUntil time.Time
+		r.Egress, freshUntil, r.EgressCached = s.cachedPublicEgress(ctx)
+		if !freshUntil.IsZero() {
+			fresh := freshUntil
+			r.EgressFreshUntil = &fresh
+		}
 	} else {
 		r.Egress.Detail = "external egress not probed because no attributable live Antigravity connection is active"
 	}
