@@ -3,10 +3,16 @@ const csrf = () => document.cookie.split('; ').find(x=>x.startsWith('agp_csrf=')
 const output = $('#output');
 let state = null;
 let assurance = null;
+let tunnelTransient = '';
 
 function pretty(v){ return typeof v === 'string' ? v : JSON.stringify(v,null,2); }
 function setOutput(v){ output.textContent = pretty(v); output.scrollTop = 0; }
 function setBusy(on){ document.querySelectorAll('button').forEach(b=>b.disabled=on); }
+function setTunnelHint(text){
+  tunnelTransient=String(text||'');
+  const el=$('#tunnel-hint');
+  if(el) el.textContent=tunnelTransient || state?.agent_tunnel_hint || '';
+}
 
 async function api(path, opts={}){
   const init = {...opts, headers:{...(opts.headers||{})}};
@@ -19,7 +25,7 @@ async function api(path, opts={}){
   const text = await r.text();
   let data = text;
   try{ data = JSON.parse(text); }catch{}
-  if(!r.ok) throw new Error(typeof data==='string' ? data : (data.error||JSON.stringify(data)));
+  if(!r.ok) throw new Error(typeof data==='string' ? data.trim() : (data.error||JSON.stringify(data)));
   return data;
 }
 
@@ -43,7 +49,7 @@ async function refresh(){
   $('#ag-state').textContent=state.antigravity_path?'found':'not found';
   $('#platform-state').textContent=`${state.os}/${state.arch}`;
   $('#proxy-url').textContent=state.proxy_url;
-  if($('#tunnel-hint')) $('#tunnel-hint').textContent=state.agent_tunnel_hint||'';
+  if($('#tunnel-hint') && !tunnelTransient) $('#tunnel-hint').textContent=state.agent_tunnel_hint||'';
 
   const sel=$('#vpn-interface');
   const current=state.settings.vpn_interface||'';
@@ -129,12 +135,19 @@ async function refreshAssurance(){
   }
 }
 
-function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[c])); }
 
 async function action(name){
+  const tunnelAction=name==='tunnel/start'||name==='tunnel/launch'||name==='tunnel/stop';
   try{
     setBusy(true);
     let res;
+
+    if(tunnelAction){
+      const msg=name==='tunnel/stop'?'Останавливаю Agent Tunnel…':'Agent Tunnel: проверяю VPN, TUN, права/capabilities и запускаю data plane…';
+      setTunnelHint(msg);
+      setOutput(msg);
+    }
 
     if(name==='refresh'){
       await Promise.all([refresh(),refreshAssurance()]);
@@ -168,10 +181,20 @@ async function action(name){
       res=await api('/api/actions/'+path,{method:'POST'});
     }
 
+    if(tunnelAction){
+      setTunnelHint(name==='tunnel/stop'?'Agent Tunnel остановлен.':'Agent Tunnel запущен; проверяю runtime evidence…');
+    }
     setOutput(res);
     await Promise.all([refresh(),refreshAssurance()]);
+    if(tunnelAction) setTimeout(()=>setTunnelHint(''),2500);
   }catch(e){
-    setOutput('ERROR\n'+e.message);
+    const message=String(e?.message||e||'unknown error');
+    setOutput('ERROR\n'+message);
+    if(tunnelAction){
+      setTunnelHint('Agent Tunnel НЕ запущен: '+message);
+      const panel=document.querySelector('.tunnel-panel');
+      if(panel) panel.scrollIntoView({behavior:'smooth',block:'center'});
+    }
   }finally{
     setBusy(false);
   }
