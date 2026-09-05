@@ -106,6 +106,10 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	if err := os.MkdirAll(cfg.Root, 0o755); err != nil {
 		return err
 	}
+	apiSecret, err := ensureAPISecret(cfg.Root)
+	if err != nil {
+		return err
+	}
 	dnsIP, dnsName := "1.1.1.1", "cloudflare-dns.com"
 	if strings.EqualFold(cfg.DNSProvider, "google") {
 		dnsIP, dnsName = "8.8.8.8", "dns.google"
@@ -169,6 +173,16 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 		},
 		"outbounds": []any{vpnDirect, systemDirect},
 		"route": map[string]any{"rules": routeRules, "final": "system-direct", "auto_detect_interface": true},
+		"services": []any{
+			map[string]any{
+				"type": "api", "tag": "agp-observe",
+				"listen": singBoxAPIHost, "listen_port": singBoxAPIPort,
+				"secret": apiSecret,
+				"access_control_allow_origin": []string{"http://127.0.0.1", "http://localhost"},
+				"access_control_allow_private_network": false,
+				"dashboard": false,
+			},
+		},
 	}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
