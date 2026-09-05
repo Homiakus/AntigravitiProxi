@@ -1,8 +1,8 @@
 //go:build linux
 
 // egress-probe is a tiny CI-only network client used to prove Linux
-// process_name/process_path routing. It intentionally does not read proxy
-// environment variables; the connection must be steered by the TUN policy.
+// process_name/process_path/domain routing. It intentionally does not read
+// proxy environment variables; the connection must be steered by TUN policy.
 package main
 
 import (
@@ -16,8 +16,8 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: egress-probe URL")
+	if len(os.Args) < 2 || len(os.Args) > 3 {
+		fmt.Fprintln(os.Stderr, "usage: egress-probe URL [http-host]")
 		os.Exit(2)
 	}
 
@@ -33,7 +33,21 @@ func main() {
 		DisableKeepAlives: true,
 	}
 	client := &http.Client{Transport: transport, Timeout: 6 * time.Second}
-	resp, err := client.Get(os.Args[1])
+	req, err := http.NewRequest(http.MethodGet, os.Args[1], nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if len(os.Args) == 3 {
+		host := strings.TrimSpace(os.Args[2])
+		if host == "" {
+			fmt.Fprintln(os.Stderr, "http-host must not be empty")
+			os.Exit(2)
+		}
+		req.Host = host
+		fmt.Fprintf(os.Stderr, "http_host=%q\n", host)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
