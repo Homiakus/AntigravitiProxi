@@ -40,6 +40,7 @@ type Server struct {
 	pm           *proxy.Manager
 	events       *eventHub
 	csrf         string
+	egressCache  egressEvidenceCache
 }
 
 type Status struct {
