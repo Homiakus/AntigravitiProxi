@@ -126,6 +126,13 @@ func (s *Server) ListenAddr() string { return s.Settings().Listen }
 func (s *Server) AutoOpen() bool     { return s.Settings().AutoOpen }
 func (s *Server) Root() string       { return s.root }
 
+func (s *Server) invalidateEgressEvidence(reason string) {
+	s.egressCache.clear()
+	if s.events != nil && strings.TrimSpace(reason) != "" {
+		s.events.publish("info", "runtime assurance evidence invalidated: "+reason)
+	}
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -377,6 +384,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.settings = cur
 	s.mu.Unlock()
+	if dataPlaneChanged {
+		s.invalidateEgressEvidence("data-plane configuration changed")
+	}
 	s.events.publish("info", "configuration transaction committed")
 	writeJSON(w, map[string]any{"ok": true, "settings": cur})
 }
@@ -410,6 +420,7 @@ func (s *Server) startSafeProxy(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("stop existing data plane: %w", err)
 		}
+		s.invalidateEgressEvidence("existing data plane stopped before SAFE proxy start")
 	}
 	if err := s.ensureSingBox(ctx); err != nil {
 		return err
@@ -445,7 +456,9 @@ func (s *Server) startSafeProxy(ctx context.Context) error {
 func (s *Server) rollbackProxyStart() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return s.pm.StopAndWait(ctx)
+	err := s.pm.StopAndWait(ctx)
+	s.invalidateEgressEvidence("data-plane startup rollback")
+	return err
 }
 
 func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
@@ -465,6 +478,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.invalidateEgressEvidence("managed data plane stopped")
 	s.events.publish("info", "managed data plane stopped")
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -583,6 +597,7 @@ func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "stop existing proxy before Agent Tunnel: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.invalidateEgressEvidence("Agent Tunnel start boundary")
 	if err := s.pm.StartAgentTunnel(ctx, s.tunnelOptions()); err != nil {
 		s.events.publish("error", "Agent Tunnel start failed: "+err.Error())
 		http.Error(w, err.Error()+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
@@ -615,6 +630,7 @@ func (s *Server) handleTunnelStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.invalidateEgressEvidence("Agent Tunnel stopped")
 	s.events.publish("info", "Agent Tunnel stopped; managed routes released")
 	writeJSON(w, map[string]bool{"ok": true})
 }
@@ -636,6 +652,7 @@ func (s *Server) handleTunnelLaunch(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		s.invalidateEgressEvidence("Agent Tunnel launch restart boundary")
 		if err := s.pm.StartAgentTunnel(ctx, s.tunnelOptions()); err != nil {
 			http.Error(w, err.Error()+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
 			return
