@@ -64,11 +64,49 @@ func TestLinuxAgentTunnelObservabilityRuntime(t *testing.T) {
 	}
 	t.Logf("authenticated sing-box API returned %d live connections", len(connections))
 
-	attestation := m.AttestAgentRoutes(ctx)
+	routeAttestation := m.AttestAgentRoutes(ctx)
+	if !routeAttestation.Available {
+		t.Fatalf("route attestation unavailable: %s", routeAttestation.Detail)
+	}
+	if routeAttestation.AgentUnexpected != 0 {
+		t.Fatalf("unexpected Agent route evidence without an injected agent flow: %#v", routeAttestation)
+	}
+
+	// The sink server returns the source address it observes. The same remote
+	// observer is queried once through local-mixed -> vpn-direct and once by an
+	// ordinary direct request from this test process. This proves that the
+	// selected outbound has a real external consequence rather than merely a
+	// correct-looking sing-box config or connection-tracker tag.
+	probeURL := os.Getenv("AGP_EGRESS_PROBE_URL")
+	if probeURL == "" {
+		t.Fatal("AGP_EGRESS_PROBE_URL is required for observability runtime proof")
+	}
+	expectedVPN := os.Getenv("AGP_EXPECT_VPN_SOURCE")
+	expectedSystem := os.Getenv("AGP_EXPECT_SYSTEM_SOURCE")
+	attestation := m.attestPublicEgressWithProviders(ctx, []egressProbeProvider{{
+		Name: "ci-source-observer",
+		URL:  probeURL,
+	}})
 	if !attestation.Available {
-		t.Fatalf("route attestation unavailable: %s", attestation.Detail)
+		t.Fatalf("public egress attestation unavailable: %#v", attestation)
 	}
-	if attestation.AgentUnexpected != 0 {
-		t.Fatalf("unexpected Agent route evidence without an injected agent flow: %#v", attestation)
+	if expectedVPN != "" {
+		found := false
+		for _, ip := range attestation.VPNObservedIPs {
+			if ip == expectedVPN {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("vpn-direct observed addresses %v do not contain expected %s; attestation=%#v", attestation.VPNObservedIPs, expectedVPN, attestation)
+		}
 	}
+	if expectedSystem != "" && attestation.SystemObservedIP != expectedSystem {
+		t.Fatalf("system-direct observed %q want %q; attestation=%#v", attestation.SystemObservedIP, expectedSystem, attestation)
+	}
+	if expectedVPN != "" && expectedSystem != "" && expectedVPN != expectedSystem && attestation.SystemRelation != "different" {
+		t.Fatalf("expected distinct vpn/system egress relation, got %q; attestation=%#v", attestation.SystemRelation, attestation)
+	}
+	t.Logf("external egress attestation: %s", attestation.Detail)
 }
