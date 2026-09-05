@@ -81,7 +81,7 @@ jobs:
         run: |
           go test -c ./internal/proxy -o /tmp/antigraviti-proxi-proxy.test
           go build -trimpath -o /tmp/agp-egress-probe ./cmd/egress-probe
-      - name: Real TUN dual-egress, crash recovery, and observability in netns
+      - name: Real TUN dual-egress, crash recovery, observability, and isolation policy in netns
         shell: bash
         run: |
           set -euo pipefail
@@ -189,7 +189,7 @@ jobs:
             AGP_EXPECT_VPN_SOURCE=10.250.0.2 \
             AGP_EXPECT_SYSTEM_SOURCE=10.251.0.2 \
             /tmp/antigraviti-proxi-proxy.test \
-            -test.run '^(TestLinuxAgentTunnelRuntimeSmoke|TestLinuxAgentTunnelCrashRecoveryPreservesUnrelatedRoutingState|TestLinuxAgentTunnelObservabilityRuntime)$' -test.v
+            -test.run '^(TestLinuxAgentTunnelRuntimeSmoke|TestLinuxAgentTunnelCrashRecoveryPreservesUnrelatedRoutingState|TestLinuxAgentTunnelObservabilityRuntime|TestLinuxDomainFallbackIsolationRuntime)$' -test.v
 
   build:
     runs-on: ubuntu-latest
