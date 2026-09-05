@@ -29,6 +29,14 @@ func validateAgentTunnelHost(binary string) error {
 	if binary == "" || binary == "." {
 		return fmt.Errorf("managed sing-box path is empty")
 	}
+
+	// Root already has the process-inspection and network privileges required by
+	// sing-box. Do not mutate file capability xattrs in privileged CI/netns or in
+	// a deliberate root diagnostic launch; only make sure the kernel TUN device
+	// exists. Normal desktop operation remains ordinary-user + one-shot broker.
+	if os.Geteuid() == 0 {
+		return privilegedEnsureTunDevice()
+	}
 	if linuxTunnelHostReady(binary) {
 		return nil
 	}
@@ -37,21 +45,15 @@ func validateAgentTunnelHost(binary string) error {
 	if err != nil {
 		return fmt.Errorf("hash managed sing-box before privilege setup: %w", err)
 	}
-	if os.Geteuid() == 0 {
-		if err := RunLinuxPrivilegedSetup(binary, hash); err != nil {
-			return err
-		}
-	} else {
-		self, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("resolve AntigravitiProxi executable for PolicyKit setup: %w", err)
-		}
-		if err := runLinuxPrivilegeBroker(self, "__linux-privileged-setup", binary, hash); err != nil {
-			return fmt.Errorf(
-				"automatic Agent Tunnel privilege setup failed: %w; manual fallback: sudo setcap %s %q",
-				err, linuxTunnelCapabilitySpec, binary,
-			)
-		}
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve AntigravitiProxi executable for PolicyKit setup: %w", err)
+	}
+	if err := runLinuxPrivilegeBroker(self, "__linux-privileged-setup", binary, hash); err != nil {
+		return fmt.Errorf(
+			"automatic Agent Tunnel privilege setup failed: %w; manual fallback: sudo setcap %s %q",
+			err, linuxTunnelCapabilitySpec, binary,
+		)
 	}
 
 	if !linuxTunnelHostReady(binary) {
