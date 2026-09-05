@@ -13,11 +13,27 @@ import (
 
 	"github.com/Homiakus/AntigravitiProxi/internal/app"
 	"github.com/Homiakus/AntigravitiProxi/internal/platform"
+	"github.com/Homiakus/AntigravitiProxi/internal/proxy"
 )
 
 var version = "dev"
 
 func main() {
+	// Internal fixed-function privilege entry point. It is intentionally not a
+	// general command runner and is invoked only through the OS privilege broker
+	// by the ordinary-user control plane.
+	if len(os.Args) > 1 && os.Args[1] == "__linux-privileged-setup" {
+		if len(os.Args) != 4 {
+			fmt.Fprintln(os.Stderr, "invalid privileged setup invocation")
+			os.Exit(2)
+		}
+		if err := proxy.RunLinuxPrivilegedSetup(os.Args[2], os.Args[3]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	noBrowser := flag.Bool("no-browser", false, "do not open the web UI automatically")
 	printVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
