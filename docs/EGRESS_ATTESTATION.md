@@ -62,6 +62,8 @@ A different managed PID or VPN interface cannot reuse the entry. `egress_cached`
 
 The key is an identity/freshness guard, not a proof that the VPN did not reconnect beneath the same interface. Therefore successful evidence remains deliberately short-lived and can never become durable health state.
 
+The cache is also explicitly invalidated on data-plane lifecycle boundaries instead of relying only on the key and TTL. Current invalidation points include data-plane configuration commits, SAFE/Agent Tunnel mode transitions, Agent Tunnel start/stop, explicit managed-data-plane stop, restart-before-launch and startup rollback. Each lifecycle invalidation publishes a local event so a state transition is auditable in the UI event stream.
+
 ## Privacy contract
 
 Public IP evidence is sensitive operational data. `AttestPublicEgress` returns it only to the local caller and does not persist or log the address. Diagnostic/support export must pass through the centralized redaction policy before this evidence is ever included in a bundle. This is part of R-019.
@@ -130,5 +132,4 @@ Next steps:
 - add explicit Windows security-descriptor verification/hardening for persisted secrets and sensitive runtime files;
 - keep `verified` as a separate assurance dimension instead of overloading basic TUN health;
 - block strong assurance on unknown helpers, ambiguous ownership or unexpected outbound;
-- add independent IPv4/IPv6 and UDP/QUIC evidence before closing R-005;
-- add cache invalidation hooks to lifecycle transitions in addition to the PID/VPN cache key, mainly to make state transitions auditable rather than relying only on short TTL.
+- add independent IPv4/IPv6 and UDP/QUIC evidence before closing R-005.
