@@ -1,114 +1,115 @@
 # AntigravitiProxi
 
-Кроссплатформенная Go-реализация `Antigravity-Proxy-Manager-v5.ps1` для Windows и Linux.
+Кроссплатформенный Go control plane для сетевого транспорта Antigravity IDE на Windows и Linux. Проект вырос из `Antigravity-Proxy-Manager-v5.ps1`, но текущая архитектура уже не является прямым портом PowerShell: она разделяет минимально-инвазивный SAFE MODE, прозрачный Agent Tunnel, runtime assurance и диагностику backend/account failures.
 
-Проект теперь использует **двухуровневую транспортную схему**:
+Главный инвариант: **Antigravity получает требуемый маршрут, а системный HTTP proxy и сетевое поведение посторонних приложений не меняются без явной причины**.
 
-1. **SAFE MODE** — лёгкий process-only HTTP/SOCKS proxy без изменения системных маршрутов.
-2. **AGENT TUNNEL** — привилегированный sing-box TUN с process-aware routing для случая, когда OAuth/регистрация работают, но внутренний агент Antigravity игнорирует `HTTP_PROXY` и завершается ошибкой `Agent execution terminated due to error`.
+## Транспортная лестница
 
-Основной принцип остаётся прежним: не включать глобальный WinINET/WinHTTP proxy и не ломать Fusion 360, Autodesk Access и другие программы.
+1. **SAFE MODE** — process-only `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` через локальный mixed proxy. WinINET/WinHTTP и глобальный proxy не меняются.
+2. **AGENT TUNNEL** — sing-box TUN с process/path-aware policy для helper-процессов, которые игнорируют proxy environment.
+3. **ELIGIBILITY DIAGNOSIS** — если transport доказан, но backend возвращает `FAILED_PRECONDITION`, `PERMISSION_DENIED`, geo/account reject и т.п., Agent Doctor прекращает бессмысленную эскалацию локальной сети и переводит диагностику на backend/account слой.
 
 ## Что реализовано
 
-- один статический Go-бинарник без runtime-зависимостей приложения;
-- Windows и Linux;
-- лёгкий web UI на стандартном `net/http`, без React/Node/npm;
-- UI встроен в бинарник через `embed`;
-- PWA: manifest + service worker, адаптивный интерфейс;
-- локальный control plane только на `127.0.0.1:48765` по умолчанию;
-- local mixed proxy `HTTP CONNECT + SOCKS5` на `127.0.0.1:7890` через `sing-box`;
-- автономная установка официального `sing-box` из GitHub Releases с проверкой `SHA-256 digest`;
-- Cloudflare DoH и Google DoH;
-- `bind_interface` к выбранному VPN-интерфейсу;
-- автоматическое обнаружение вероятных VPN-интерфейсов (`Amnezia`, `WireGuard`, `wg`, `tun`, `Tailscale`, `Outline`);
-- диагностика System DNS ↔ pinned Cloudflare DoH ↔ pinned Google DoH;
-- HTTP proxy tests и собственный SOCKS5h remote-DNS test;
-- принудительный production Cloud Code endpoint;
-- очистка унаследованного `CLOUD_CODE_URL` перед запуском IDE;
-- process-only запуск Antigravity IDE;
-- **Agent Tunnel: sing-box TUN + process_name/process_path_regex routing**;
-- secure DoH только для Google/Antigravity namespaces, локальный resolver для остального DNS;
-- отдельный `system-direct` outbound для приложений, не относящихся к Antigravity;
-- Linux `auto_redirect` в Agent Tunnel;
-- Windows/Linux privilege hints для TUN;
-- встроенный **Agent Doctor** для классификации `FAILED_PRECONDITION`, geo/account eligibility, MCP, hooks, auth, quota и backend failures;
-- emergency hosts override с backup и rollback;
-- live events через SSE и live sing-box logs;
-- CSRF-защита локальных write API;
-- GitHub Actions для тестов, Windows/Linux builds и release artifacts.
+- один Go-проект без Electron/Node/npm/React/Vue;
+- embedded responsive PWA на `net/http + embed + HTML/CSS/vanilla JS + SSE`;
+- loopback control plane `127.0.0.1:48765`;
+- local mixed proxy `127.0.0.1:7890`;
+- pinned managed `sing-box 1.14.0`;
+- fail-closed SHA-256 verification официального release asset и persistent provenance;
+- Cloudflare/Google DoH;
+- явный `bind_interface` к выбранному VPN;
+- автоматическое обнаружение вероятных VPN-интерфейсов;
+- SAFE MODE с process-only launch environment;
+- Agent Tunnel с `process_name` + `process_path_regex`;
+- `vpn-direct` для Antigravity path и `system-direct` для unrelated traffic;
+- Linux capture profile: `auto_route=true`, `strict_route=true`, `auto_redirect=false`;
+- secure DoH для Antigravity/Google policy и `local-dns` для unrelated DNS;
+- optional domain fallback, который UI явно помечает как `ISOLATION-RELAXED`;
+- Agent Doctor CLI + web API;
+- runtime health и composed assurance через `GET /api/attestation`;
+- PID/socket → sing-box outbound → external-egress evidence;
+- transactional Linux startup/rollback и durable network-state journal;
+- stale-state recovery с conservative ownership policy;
+- responsive UI с отдельными SAFE MODE, Agent Tunnel, setup status и Runtime network assurance;
+- FMEA risk register + `riskcheck` CI/release gate.
 
-## Уровень 1 — SAFE MODE
-
-Рекомендуемый первый режим:
+## SAFE MODE
 
 ```text
 Antigravity IDE
-      │
-      │ process-only HTTP_PROXY / HTTPS_PROXY / ALL_PROXY
+      │ process-only proxy env
       ▼
 127.0.0.1:7890
-      │
       ▼
-   sing-box
-      │
-      ├── DNS → pinned DoH
-      │
-      └── outbound → выбранный VPN interface
-                         │
-                         ▼
-                       Google
+managed sing-box
+      ├── DoH
+      └── bind_interface → selected VPN
 
-Fusion 360 / Autodesk / другие приложения
-      │
-      └──────────────→ обычная системная сеть / VPN
+WinINET / WinHTTP / global HTTP proxy: unchanged
+Fusion 360 / Autodesk / unrelated apps: unchanged
 ```
 
-Глобальные WinINET/WinHTTP proxy-настройки **не используются**.
+SAFE MODE — рекомендуемый первый уровень.
 
-## Уровень 2 — AGENT TUNNEL
-
-Используйте его, если вход в аккаунт проходит, но реальная генерация/агент падает. Некоторые helper-процессы IDE могут использовать собственный transport stack и игнорировать proxy environment.
+## AGENT TUNNEL
 
 ```text
-Antigravity.exe
-language_server*
-agy*
-bundled Node helpers
-        │
-        ▼
-    sing-box TUN
-        │
-        ├── sniff + process matching
-        │
-        ├── Google/Antigravity DNS → secure DoH
-        │
-        └── agent-vpn outbound → выбранный VPN interface
+Antigravity / language_server / bundled helpers
+                 │
+                 ▼
+          antigravity-tun
+                 │
+       process/path policy
+                 │
+                 ▼
+             vpn-direct
+                 │
+                 ▼
+          selected VPN
 
-остальные процессы
+unrelated process
         │
-        └── system-direct → обычный системный маршрут
+        └──────────────→ system-direct
 ```
 
-Ключевые свойства:
+На Linux используется `auto_route + strict_route` при `auto_redirect=false`. Это зафиксированный runtime-evidence инвариант: dual-egress CI показал, что `auto_redirect=true` в текущей topology может позволить локальному default route обойти process-aware TUN policy до того, как sing-box увидит процесс.
 
-- TUN и local mixed proxy работают в одном экземпляре sing-box;
-- `Antigravity.exe`, `language_server*`, `agy*` маршрутизируются через `agent-vpn`;
-- generic `node/node.exe` не проксируется глобально: через VPN идут только соединения к Google/Antigravity namespaces;
-- private/LAN адреса исключены из TUN auto-route;
-- `strict_route=false` по умолчанию, чтобы снизить риск конфликтов с VirtualBox/Fusion/другими desktop-приложениями;
-- на Linux включён `auto_redirect`;
-- unrelated DNS использует `system-local`, а `*.googleapis.com`, `*.googleusercontent.com`, `antigravity.google` и критичные OAuth/Cloud Code endpoints — secure DoH.
+Process/path rules идут до `sniff`. Domain fallback является дополнительным compatibility-механизмом и не маскируется под строгую process isolation: при его включении assurance/UI показывает `ISOLATION-RELAXED`.
 
-### Права
+## Права
 
-Windows: запускайте AntigravitiProxi **от имени администратора**, если Agent Tunnel не может создать TUN/маршруты.
+### Linux
 
-Linux: нужны `root` или подходящие capabilities (`CAP_NET_ADMIN`, обычно также `CAP_NET_RAW`).
+Штатный запуск выполняется **обычным пользователем**:
+
+```bash
+go run ./cmd/antigraviti-proxi
+```
+
+При первом запуске Agent Tunnel AntigravitiProxi автоматически:
+
+1. проверяет/устанавливает hash-verified managed sing-box;
+2. проверяет `/dev/net/tun`;
+3. проверяет file capabilities;
+4. если требуется, вызывает **один fixed-function internal helper** через PolicyKit (`pkexec`), а при интерактивном terminal fallback — через `sudo`;
+5. helper повторно проверяет путь/ownership/SHA-256 managed binary;
+6. при необходимости загружает `tun`, устанавливает libcap tooling и выдаёт только:
+   `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SYS_PTRACE`, `CAP_DAC_READ_SEARCH`;
+7. повторно проверяет capabilities и только после этого продолжает Agent Tunnel startup.
+
+Пароль приложение не читает, не хранит и не прокидывает через stdin. Авторизацию выполняет ОС. После замены managed sing-box потерянные file capabilities обнаруживаются и восстанавливаются тем же bounded helper flow при следующем явном запуске Agent Tunnel.
+
+Подробнее: [`docs/LINUX_PRIVILEGE_BOOTSTRAP.md`](docs/LINUX_PRIVILEGE_BOOTSTRAP.md) и [`docs/LINUX.md`](docs/LINUX.md).
+
+### Windows
+
+Agent Tunnel поддерживается, но полноценный minimal UAC helper ещё не завершён: для TUN/route operations сейчас может потребоваться запуск AntigravitiProxi от Administrator. Это остаётся открытым P1/R-006 пунктом и не должно описываться как уже решённая Linux-equivalent privilege model.
 
 ## Быстрый запуск
 
-Нужен Go 1.23+ для самого проекта.
+Нужен Go 1.23+:
 
 ```bash
 git clone https://github.com/Homiakus/AntigravitiProxi.git
@@ -116,7 +117,11 @@ cd AntigravitiProxi
 go run ./cmd/antigraviti-proxi
 ```
 
-После запуска откроется `http://127.0.0.1:48765/`.
+UI откроется на:
+
+```text
+http://127.0.0.1:48765/
+```
 
 Без автоматического открытия браузера:
 
@@ -126,20 +131,34 @@ go run ./cmd/antigraviti-proxi --no-browser
 
 ## Рекомендуемый сценарий
 
-1. Включить рабочий VPN.
-2. Запустить `AntigravitiProxi`.
-3. Выбрать VPN-интерфейс, например `AmneziaVPN`.
-4. Нажать **Сохранить**.
-5. Сначала попробовать **SAFE MODE**.
-6. Если регистрация работает, но agent execution падает — перезапустить приложение с нужными правами и нажать **Agent Tunnel + запустить IDE**.
-7. Воспроизвести ошибку простым запросом `hello`.
-8. Нажать **Agent Doctor** и посмотреть `likely_cause`.
+1. Подключить рабочий VPN.
+2. Запустить AntigravitiProxi обычным пользователем.
+3. Выбрать VPN-интерфейс; если найден ровно один подходящий кандидат, UI может выбрать его автоматически.
+4. Сначала запустить **SAFE MODE**.
+5. Если OAuth/IDE работают, а agent execution падает — нажать **«Подготовить Tunnel и запустить IDE»**.
+6. На Linux при необходимости подтвердить один системный PolicyKit-диалог.
+7. После запуска смотреть не только `ACTIVE`, а блок **Runtime network assurance**: `Assurance`, `Isolation`, `PID route`, `External egress`, `Evidence age`.
+8. Если transport доказан, но Agent всё равно падает — запустить **Agent Doctor**.
 
-CLI-версия Doctor:
+CLI Doctor:
 
 ```bash
 go run ./cmd/agent-doctor
 ```
+
+## Runtime assurance
+
+`GET /api/attestation` и UI разделяют:
+
+- состояние transport (`idle/partial/verified/degraded`);
+- strict vs `isolation-relaxed` policy;
+- discovered Antigravity PID tree;
+- PID/socket ownership;
+- sing-box connection/outbound evidence;
+- внешний egress;
+- свежесть/cached TTL evidence.
+
+Открытый локальный порт сам по себе не считается доказательством здоровья: listener должен принадлежать managed sing-box PID, а Agent Tunnel должен иметь TUN/VPN/journal/runtime evidence.
 
 ## Сборка
 
@@ -150,32 +169,28 @@ CGO_ENABLED=0 go build -trimpath -o antigraviti-proxi ./cmd/antigraviti-proxi
 Windows cross-build:
 
 ```bash
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -o antigraviti-proxi-windows-amd64.exe ./cmd/antigraviti-proxi
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+  go build -trimpath -o antigraviti-proxi-windows-amd64.exe ./cmd/antigraviti-proxi
 ```
-
-## Почему web UI лёгкий
-
-Web-слой: `net/http + embed + HTML/CSS/vanilla JS + SSE`. Нет Electron, Node.js, npm, React/Vue, отдельного web-сервера, SQLite или CGO.
-
-## Данные приложения
-
-Используется `os.UserConfigDir()`:
-
-- Windows обычно `%LOCALAPPDATA%\AntigravitiProxi`;
-- Linux обычно `~/.config/AntigravitiProxi`.
-
-Внутри: `config.json`, `sing-box.json`, логи, `bin/sing-box[.exe]`, `backups/`.
 
 ## Безопасность
 
-- UI только на loopback по умолчанию;
+- control plane и local proxy в normal mode принудительно loopback-only;
 - write API требуют SameSite cookie + CSRF header;
 - TLS verification не отключается;
-- sing-box проверяется по digest официального GitHub Release;
+- privileged Agent Tunnel installer fail-closed при отсутствии валидного SHA-256 evidence;
+- Linux privilege bootstrap не принимает произвольные команды и повторно проверяет managed binary после elevation;
+- global WinINET/WinHTTP proxy не используется;
 - emergency hosts override выключен по умолчанию;
-- global system HTTP proxy не используется;
-- Agent Tunnel включается только вручную и остаётся отдельным escalation-уровнем;
-- unrelated applications идут через `system-direct`, а не через `agent-vpn`;
-- Agent Doctor редактирует обнаруженные bearer/OAuth token values в сниппетах.
+- domain fallback всегда видим как ослабление isolation;
+- diagnostic/assurance архитектура не должна путать transport success с server-side account eligibility.
 
-Подробнее: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/AGENT_EXECUTION_FAILURE.md`](docs/AGENT_EXECUTION_FAILURE.md), [`MASTER_PLAN.md`](MASTER_PLAN.md).
+## Документация
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — архитектурные инварианты и data plane;
+- [`docs/LINUX.md`](docs/LINUX.md) — Linux эксплуатация;
+- [`docs/LINUX_PRIVILEGE_BOOTSTRAP.md`](docs/LINUX_PRIVILEGE_BOOTSTRAP.md) — privilege boundary;
+- [`docs/AGENT_EXECUTION_FAILURE.md`](docs/AGENT_EXECUTION_FAILURE.md) — transport/eligibility диагностика;
+- [`docs/ARCHITECTURE_FMEA.md`](docs/ARCHITECTURE_FMEA.md) — Design FMEA;
+- [`risks/register.json`](risks/register.json) — machine-readable risk source of truth;
+- [`MASTER_PLAN.md`](MASTER_PLAN.md) — реализация и risk-to-plan tracking.
