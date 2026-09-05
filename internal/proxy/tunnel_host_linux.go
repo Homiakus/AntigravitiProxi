@@ -3,10 +3,14 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -75,10 +79,25 @@ func linuxTunnelHostReady(binary string) bool {
 }
 
 func missingLinuxCapabilities(output string) []string {
-	caps := strings.ToLower(output)
+	// Parse capability clauses, not substrings: names in a filename and
+	// permitted-only capabilities do not establish executable readiness.
+	present := make(map[string]bool)
+	clauses := regexp.MustCompile(`(?:^|\s)((?:cap_[a-z0-9_]+)(?:,cap_[a-z0-9_]+)*)[=+]([eip]+)(?:\s|$)`)
+	for _, field := range strings.Fields(strings.ToLower(output)) {
+		clause := clauses.FindStringSubmatch(field)
+		if clause == nil {
+			continue
+		}
+		if !strings.Contains(clause[2], "e") || !strings.Contains(clause[2], "p") {
+			continue
+		}
+		for _, name := range strings.Split(clause[1], ",") {
+			present[name] = true
+		}
+	}
 	missing := make([]string, 0, len(requiredLinuxTunnelCapabilities))
 	for _, capName := range requiredLinuxTunnelCapabilities {
-		if !strings.Contains(caps, capName) {
+		if !present[capName] {
 			missing = append(missing, capName)
 		}
 	}
@@ -136,4 +155,51 @@ func runLinuxPrivilegeBroker(command string, args ...string) error {
 func stdinIsTerminal() bool {
 	st, err := os.Stdin.Stat()
 	return err == nil && st.Mode()&os.ModeCharDevice != 0
+}
+
+// Preserve explicit gateway host routes outside the chosen VPN. VPN clients
+// install these to keep their encrypted transport outside their own tunnel.
+func tunnelUpstreamHostRoutes(ctx context.Context, vpn string) ([]string, error) {
+	var routes []string
+	for _, family := range []string{"-4", "-6"} {
+		raw, err := exec.CommandContext(ctx, "ip", "-j", family, "route", "show", "table", "main").Output()
+		if err != nil {
+			return nil, err
+		}
+		found, err := parseUpstreamHostRoutes(raw, vpn)
+		if err != nil {
+			return nil, err
+		}
+		routes = append(routes, found...)
+	}
+	return routes, nil
+}
+
+func parseUpstreamHostRoutes(raw []byte, vpn string) ([]string, error) {
+	var entries []struct {
+		Dst     string
+		Dev     string
+		Gateway string
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, err
+	}
+	var routes []string
+	for _, r := range entries {
+		if r.Dev == "" || r.Dev == vpn || r.Dev == agentTunName || r.Gateway == "" {
+			continue
+		}
+		prefix, err := netip.ParsePrefix(r.Dst)
+		if err != nil {
+			addr, addrErr := netip.ParseAddr(r.Dst)
+			if addrErr != nil {
+				continue
+			}
+			prefix = netip.PrefixFrom(addr, addr.BitLen())
+		}
+		if prefix.Bits() == prefix.Addr().BitLen() {
+			routes = append(routes, prefix.String())
+		}
+	}
+	return routes, nil
 }

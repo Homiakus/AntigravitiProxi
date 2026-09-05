@@ -229,10 +229,10 @@ func runSourceProbe(binary, target string) (source, meta string, err error) {
 
 func probeEnvironment(base []string) []string {
 	blocked := map[string]bool{
-		"HTTP_PROXY": true,
+		"HTTP_PROXY":  true,
 		"HTTPS_PROXY": true,
-		"ALL_PROXY": true,
-		"NO_PROXY": true,
+		"ALL_PROXY":   true,
+		"NO_PROXY":    true,
 	}
 	out := make([]string, 0, len(base)+2)
 	for _, item := range base {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -28,6 +29,49 @@ func main() {
 			os.Exit(2)
 		}
 		if err := proxy.RunLinuxPrivilegedSetup(os.Args[2], os.Args[3]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "__linux-privileged-recover" {
+		if len(os.Args) != 3 {
+			fmt.Fprintln(os.Stderr, "invalid privileged recovery invocation")
+			os.Exit(2)
+		}
+		if err := proxy.RunLinuxPrivilegedRecovery(os.Args[2]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "__linux-hard-launch" {
+		if len(os.Args) != 7 {
+			fmt.Fprintln(os.Stderr, "invalid kernel-hard launch invocation")
+			os.Exit(2)
+		}
+		uid, err := strconv.ParseUint(os.Args[6], 10, 32)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invalid protected launch uid:", err)
+			os.Exit(2)
+		}
+		if err := proxy.RunLinuxHardLaunch(os.Args[2], os.Args[3], os.Args[4], os.Args[5], uint32(uid)); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "__linux-hard-child" {
+		if len(os.Args) != 5 {
+			fmt.Fprintln(os.Stderr, "invalid kernel-hard child invocation")
+			os.Exit(2)
+		}
+		uid, err := strconv.ParseUint(os.Args[4], 10, 32)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "invalid protected child uid:", err)
+			os.Exit(2)
+		}
+		if err := proxy.RunLinuxHardChild(os.Args[2], os.Args[3], uint32(uid)); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

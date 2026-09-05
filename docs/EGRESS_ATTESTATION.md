@@ -133,3 +133,15 @@ Next steps:
 - keep `verified` as a separate assurance dimension instead of overloading basic TUN health;
 - block strong assurance on unknown helpers, ambiguous ownership or unexpected outbound;
 - add independent IPv4/IPv6 and UDP/QUIC evidence before closing R-005.
+
+The attestor now exposes `ipv4_observed`, `ipv6_observed`, `tcp_observed`,
+`udp_observed`, `quic_observed` and `coverage_complete`. HTTPS observers only
+set TCP evidence; `coverage_complete` remains false until independent
+dual-stack UDP and QUIC observers are present. The application returns
+`partial`, never `verified`, for incomplete family/transport coverage.
+
+Process-tree discovery also publishes endpoint candidates found in helper
+command lines. Candidates are intentionally not routed automatically: an
+operator must place reviewed hostnames in `tunnel_learned_domains`, which is
+validated as a narrow hostname-only allowlist and flows through the
+Settings-to-runtime-options contract into generated policy.

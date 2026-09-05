@@ -50,6 +50,7 @@ type TunnelStateJournal struct {
 	Phase         string            `json:"phase"`
 	OperationID   string            `json:"operation_id"`
 	PID           int               `json:"pid,omitempty"`
+	PIDIdentity   string            `json:"pid_identity,omitempty"`
 	VPNInterface  string            `json:"vpn_interface"`
 	CreatedAt     time.Time         `json:"created_at"`
 	UpdatedAt     time.Time         `json:"updated_at"`
@@ -206,6 +207,13 @@ func (m *Manager) markTunnelActive(ctx context.Context) error {
 	}
 	j.Phase = "active"
 	j.PID = m.ManagedPID()
+	if j.PID > 0 {
+		identity, identityErr := platformProcessIdentity(j.PID)
+		if identityErr != nil {
+			return fmt.Errorf("capture managed process identity: %w", identityErr)
+		}
+		j.PIDIdentity = identity
+	}
 	j.Active = &active
 	j.Owned = mergeOwnedNetworkDelta(j.Owned, deriveOwnedNetworkDelta(j.Before, active))
 	j.Owned.TunnelInterface = agentTunName
@@ -275,7 +283,14 @@ func (m *Manager) RecoverStaleNetworkState(ctx context.Context) error {
 		return m.persistCleanJournal(j)
 	}
 	if j.PID > 0 && platformProcessAlive(j.PID) {
-		return fmt.Errorf("previous Agent Tunnel journal still points to live PID %d; refusing to mutate its network state", j.PID)
+		identity, identityErr := platformProcessIdentity(j.PID)
+		if j.PIDIdentity == "" || identityErr != nil {
+			return fmt.Errorf("previous Agent Tunnel journal still points to live PID %d without verifiable process identity; refusing to mutate its network state", j.PID)
+		}
+		if identity == j.PIDIdentity {
+			return fmt.Errorf("previous Agent Tunnel journal still points to the same live PID %d; refusing to mutate its network state", j.PID)
+		}
+		j.Recovery = append(j.Recovery, fmt.Sprintf("PID %d was reused by a different process identity; stale helper ownership released", j.PID))
 	}
 
 	current, err := capturePlatformNetworkSnapshot(ctx)
@@ -295,6 +310,15 @@ func (m *Manager) RecoverStaleNetworkState(ctx context.Context) error {
 	}
 
 	actions, err := recoverPlatformOwnedNetworkState(ctx, *j)
+	if err != nil {
+		privilegedActions, privilegedErr := m.tryPrivilegedNetworkRecovery(ctx, err)
+		if privilegedErr == nil {
+			actions = append(actions, privilegedActions...)
+			err = nil
+		} else if privilegedErr != err {
+			err = fmt.Errorf("unprivileged recovery: %v; privileged recovery: %w", err, privilegedErr)
+		}
+	}
 	if err != nil {
 		j.LastError = err.Error()
 		j.Recovery = append(j.Recovery, actions...)
@@ -317,6 +341,7 @@ func (m *Manager) RecoverStaleNetworkState(ctx context.Context) error {
 	}
 	j.Phase = "clean"
 	j.PID = 0
+	j.PIDIdentity = ""
 	j.LastError = ""
 	return m.persistCleanJournal(j)
 }

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -34,7 +35,7 @@ func TestParseObservedIP(t *testing.T) {
 }
 
 func TestProbeOneEgressProducesStructuredEvidence(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Cache-Control"); got != "no-cache" {
 			t.Fatalf("Cache-Control=%q", got)
 		}
@@ -56,7 +57,7 @@ func TestProbeOneEgressProducesStructuredEvidence(t *testing.T) {
 }
 
 func TestProbeOneEgressRejectsNon2xxAndGarbage(t *testing.T) {
-	badStatus := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	badStatus := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no", http.StatusBadGateway)
 	}))
 	defer badStatus.Close()
@@ -64,11 +65,24 @@ func TestProbeOneEgressRejectsNon2xxAndGarbage(t *testing.T) {
 		t.Fatalf("expected HTTP failure evidence, got %#v", e)
 	}
 
-	garbage := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	garbage := newIPv4TestServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("not-an-ip"))
 	}))
 	defer garbage.Close()
 	if e := probeOneEgress(context.Background(), egressHTTPClient(nil), egressProbeProvider{Name: "garbage", URL: garbage.URL}, "test"); e.OK || e.Error == "" {
 		t.Fatalf("expected parse failure evidence, got %#v", e)
 	}
+}
+
+func newIPv4TestServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(handler)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		srv.Close()
+		t.Fatalf("listen IPv4 test server: %v", err)
+	}
+	srv.Listener = listener
+	srv.Start()
+	return srv
 }

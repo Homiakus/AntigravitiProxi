@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/Homiakus/AntigravitiProxi/internal/atomicfile"
@@ -12,15 +13,16 @@ import (
 )
 
 type Settings struct {
-	Listen               string `json:"listen"`
-	ProxyHost            string `json:"proxy_host"`
-	ProxyPort            int    `json:"proxy_port"`
-	VPNInterface         string `json:"vpn_interface"`
-	DNSProvider          string `json:"dns_provider"`
-	SingBoxVer           string `json:"sing_box_version"`
-	AutoOpen             bool   `json:"auto_open"`
-	TunnelStrictRoute    bool   `json:"tunnel_strict_route"`
-	TunnelDomainFallback bool   `json:"tunnel_domain_fallback"`
+	Listen               string   `json:"listen"`
+	ProxyHost            string   `json:"proxy_host"`
+	ProxyPort            int      `json:"proxy_port"`
+	VPNInterface         string   `json:"vpn_interface"`
+	DNSProvider          string   `json:"dns_provider"`
+	SingBoxVer           string   `json:"sing_box_version"`
+	AutoOpen             bool     `json:"auto_open"`
+	TunnelStrictRoute    bool     `json:"tunnel_strict_route"`
+	TunnelDomainFallback bool     `json:"tunnel_domain_fallback"`
+	TunnelLearnedDomains []string `json:"tunnel_learned_domains,omitempty"`
 }
 
 func defaultSettings() Settings {
@@ -32,7 +34,7 @@ func defaultSettings() Settings {
 		SingBoxVer:           proxy.DefaultSingBoxVersion,
 		AutoOpen:             true,
 		TunnelStrictRoute:    false,
-		TunnelDomainFallback: true,
+		TunnelDomainFallback: false,
 	}
 }
 
@@ -63,10 +65,12 @@ func loadSettings(path string) Settings {
 	}
 	// Older configs predate this field. JSON bool cannot distinguish omitted
 	// from false, so migrate legacy files by inspecting the raw JSON key.
+	// Strict process isolation is the secure migration default; users who
+	// explicitly enabled the field keep their chosen compatibility mode.
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(b, &raw) == nil {
 		if _, ok := raw["tunnel_domain_fallback"]; !ok {
-			s.TunnelDomainFallback = true
+			s.TunnelDomainFallback = false
 		}
 	}
 
@@ -81,6 +85,7 @@ func loadSettings(path string) Settings {
 	if s.ProxyPort <= 0 || s.ProxyPort > 65535 {
 		s.ProxyPort = defaults.ProxyPort
 	}
+	s.TunnelLearnedDomains = normalizeLearnedDomains(s.TunnelLearnedDomains)
 	return s
 }
 
@@ -105,7 +110,25 @@ func validateSettingsSecurity(s Settings) error {
 	if s.ProxyPort <= 0 || s.ProxyPort > 65535 {
 		return fmt.Errorf("invalid proxy port %d", s.ProxyPort)
 	}
+	if len(normalizeLearnedDomains(s.TunnelLearnedDomains)) != len(s.TunnelLearnedDomains) {
+		return fmt.Errorf("tunnel learned domains contain invalid or duplicate entries")
+	}
 	return nil
+}
+
+func normalizeLearnedDomains(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		host := strings.ToLower(strings.TrimSpace(raw))
+		if host == "" || strings.ContainsAny(host, "/:*?[]") || strings.Contains(host, "..") || !strings.Contains(host, ".") || seen[host] {
+			continue
+		}
+		seen[host] = true
+		out = append(out, host)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func isLoopbackListen(addr string) bool {

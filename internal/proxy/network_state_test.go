@@ -4,9 +4,9 @@ import "testing"
 
 func TestDeriveOwnedNetworkDelta(t *testing.T) {
 	before := NetworkSnapshot{
-		RoutesV4: []string{"default via 10.0.0.1 dev eth0 table 100"},
-		RulesV4:  []string{"1000: from all lookup 100"},
-		DNSFingerprint: "dns-a",
+		RoutesV4:            []string{"default via 10.0.0.1 dev eth0 table 100"},
+		RulesV4:             []string{"1000: from all lookup 100"},
+		DNSFingerprint:      "dns-a",
 		FirewallFingerprint: "fw-a",
 	}
 	after := NetworkSnapshot{
@@ -19,7 +19,7 @@ func TestDeriveOwnedNetworkDelta(t *testing.T) {
 			"1000: from all lookup 100",
 			"9000: from all lookup 2022",
 		},
-		DNSFingerprint: "dns-a",
+		DNSFingerprint:      "dns-a",
 		FirewallFingerprint: "fw-b",
 	}
 

@@ -1,27 +1,31 @@
 package antigravity
 
 import (
+	"regexp"
 	"sort"
 	"strings"
 )
 
 type ProcessInfo struct {
-	PID       int    `json:"pid"`
-	PPID      int    `json:"ppid"`
-	Name      string `json:"name"`
-	Executable string `json:"executable,omitempty"`
+	PID         int    `json:"pid"`
+	PPID        int    `json:"ppid"`
+	Name        string `json:"name"`
+	Executable  string `json:"executable,omitempty"`
 	CommandLine string `json:"command_line,omitempty"`
-	Role      string `json:"role"`
-	Known     bool   `json:"known"`
+	Role        string `json:"role"`
+	Known       bool   `json:"known"`
 }
 
 type ProcessTreeReport struct {
-	Processes      []ProcessInfo `json:"processes"`
-	UnknownHelpers []ProcessInfo `json:"unknown_helpers,omitempty"`
-	RootPIDs       []int         `json:"root_pids,omitempty"`
-	Complete       bool          `json:"complete"`
-	Detail         string        `json:"detail,omitempty"`
+	Processes        []ProcessInfo `json:"processes"`
+	UnknownHelpers   []ProcessInfo `json:"unknown_helpers,omitempty"`
+	RootPIDs         []int         `json:"root_pids,omitempty"`
+	Complete         bool          `json:"complete"`
+	Detail           string        `json:"detail,omitempty"`
+	LearnedEndpoints []string      `json:"learned_endpoints,omitempty"`
 }
+
+var endpointCandidateRE = regexp.MustCompile(`(?i)\b(?:https?://)?([a-z0-9][a-z0-9.-]*\.[a-z]{2,})(?::[0-9]{1,5})?\b`)
 
 // DiscoverAgentProcessTree inventories the live Antigravity process tree. It
 // deliberately includes unknown descendants: a new helper must become visible
@@ -63,27 +67,53 @@ func buildAgentProcessTree(all []ProcessInfo) ProcessTreeReport {
 
 	processes := make([]ProcessInfo, 0, len(selected))
 	unknown := make([]ProcessInfo, 0)
+	learned := make([]string, 0)
 	for _, p := range selected {
 		processes = append(processes, p)
 		if !p.Known {
 			unknown = append(unknown, p)
 		}
+		for _, match := range endpointCandidateRE.FindAllStringSubmatch(p.CommandLine, -1) {
+			if len(match) > 1 && !isCommonNonBackendHost(match[1]) && !containsString(learned, strings.ToLower(match[1])) {
+				learned = append(learned, strings.ToLower(match[1]))
+			}
+		}
 	}
 	sort.Slice(processes, func(i, j int) bool { return processes[i].PID < processes[j].PID })
 	sort.Slice(unknown, func(i, j int) bool { return unknown[i].PID < unknown[j].PID })
 	sort.Ints(rootPIDs)
+	sort.Strings(learned)
 
 	detail := "no running Antigravity process tree found"
 	if len(processes) > 0 {
 		detail = "live Antigravity process tree inventoried"
 	}
 	return ProcessTreeReport{
-		Processes:      processes,
-		UnknownHelpers: unknown,
-		RootPIDs:       rootPIDs,
-		Complete:       true,
-		Detail:         detail,
+		Processes:        processes,
+		UnknownHelpers:   unknown,
+		RootPIDs:         rootPIDs,
+		Complete:         true,
+		Detail:           detail,
+		LearnedEndpoints: learned,
 	}
+}
+
+func isCommonNonBackendHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "example.com", "example.org", "example.net":
+		return true
+	default:
+		return false
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func isAntigravityRoot(p ProcessInfo) bool {

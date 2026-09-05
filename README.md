@@ -30,7 +30,7 @@
 - **Agent Tunnel: sing-box TUN + process_name/process_path_regex routing**;
 - secure DoH только для Google/Antigravity namespaces, локальный resolver для остального DNS;
 - отдельный `system-direct` outbound для приложений, не относящихся к Antigravity;
-- Linux `auto_redirect` в Agent Tunnel;
+- Linux `auto_route + strict_route` в Agent Tunnel;
 - Windows/Linux privilege hints для TUN;
 - встроенный **Agent Doctor** для классификации `FAILED_PRECONDITION`, geo/account eligibility, MCP, hooks, auth, quota и backend failures;
 - emergency hosts override с backup и rollback;
@@ -96,15 +96,16 @@ bundled Node helpers
 - `Antigravity.exe`, `language_server*`, `agy*` маршрутизируются через `agent-vpn`;
 - generic `node/node.exe` не проксируется глобально: через VPN идут только соединения к Google/Antigravity namespaces;
 - private/LAN адреса исключены из TUN auto-route;
-- `strict_route=false` по умолчанию, чтобы снизить риск конфликтов с VirtualBox/Fusion/другими desktop-приложениями;
-- на Linux включён `auto_redirect`;
-- unrelated DNS использует `system-local`, а `*.googleapis.com`, `*.googleusercontent.com`, `antigravity.google` и критичные OAuth/Cloud Code endpoints — secure DoH.
+- `strict_route=true` на Linux и `false` на Windows, чтобы снизить риск конфликтов с VirtualBox/Fusion/другими desktop-приложениями;
+- на Linux `auto_redirect=false`, чтобы локальные процессы проходили через TUN до системного default route;
+- domain fallback выключен по умолчанию: трафик через VPN определяется процессом/путём, а fallback для Google endpoints включается только явно;
+- DNS запросов Antigravity используются secure DoH, DNS остальных процессов остаётся через `system-local`; domain fallback для известных Google endpoints включается отдельно.
 
 ### Права
 
 Windows: запускайте AntigravitiProxi **от имени администратора**, если Agent Tunnel не может создать TUN/маршруты.
 
-Linux: нужны `root` или подходящие capabilities (`CAP_NET_ADMIN`, обычно также `CAP_NET_RAW`).
+Linux: managed sing-box нужны `CAP_NET_ADMIN`, `CAP_NET_RAW`, `CAP_SYS_PTRACE`, `CAP_DAC_READ_SEARCH`. Приложение настраивает их через PolicyKit/sudo; UI и IDE запускайте обычным пользователем. Подробнее: [Linux](docs/LINUX.md).
 
 ## Быстрый запуск
 

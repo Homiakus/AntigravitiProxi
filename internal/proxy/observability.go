@@ -50,6 +50,9 @@ func ensureAPISecret(root string) (string, error) {
 	if b, err := os.ReadFile(path); err == nil {
 		secret := strings.TrimSpace(string(b))
 		if len(secret) >= 32 {
+			if err := hardenSensitiveFile(path); err != nil {
+				return "", fmt.Errorf("harden existing sing-box API secret: %w", err)
+			}
 			return secret, nil
 		}
 		return "", errors.New("existing sing-box API secret is unexpectedly short")
@@ -64,6 +67,12 @@ func ensureAPISecret(root string) (string, error) {
 	secret := hex.EncodeToString(raw)
 	if err := atomicfile.Write(path, []byte(secret+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("persist sing-box API secret: %w", err)
+	}
+	if err := hardenSensitiveFile(path); err != nil {
+		return "", fmt.Errorf("harden sing-box API secret: %w", err)
+	}
+	if err := hardenSensitiveFile(path + ".previous-good"); err != nil {
+		return "", fmt.Errorf("harden previous sing-box API secret: %w", err)
 	}
 	return secret, nil
 }

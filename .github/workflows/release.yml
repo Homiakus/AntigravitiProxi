@@ -60,8 +60,32 @@ jobs:
           name: build-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
 
-  release:
+  sbom:
     needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+      - name: Generate Go module SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          go list -m -json all | jq -s '{format: "go-module-sbom-v1", generated_at: (now | todateiso8601), modules: .}' > dist/sbom-go-modules.json
+          test -s dist/sbom-go-modules.json
+          jq empty dist/sbom-go-modules.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-sbom
+          path: dist/sbom-go-modules.json
+
+  release:
+    needs: [build, sbom]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -69,6 +93,22 @@ jobs:
           pattern: build-*
           merge-multiple: true
           path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-sbom
+          path: dist
+      - name: Verify release checksums and SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s dist/sbom-go-modules.json
+          jq empty dist/sbom-go-modules.json
+          test -n "$(find dist -maxdepth 1 -type f -name 'SHA256-*' -print -quit)"
+          for sums in dist/SHA256-*; do sha256sum --check "$sums"; done
+      - name: Attest release artifact provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/antigraviti-proxi-*'
       - uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true

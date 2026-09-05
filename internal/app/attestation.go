@@ -116,6 +116,9 @@ func classifyNetworkAttestation(tunnelActive bool, r NetworkAttestationReport) (
 	if len(r.ProcessTree.UnknownHelpers) > 0 {
 		return AssuranceDegraded, fmt.Sprintf("%d unknown Antigravity descendant(s) require explicit review", len(r.ProcessTree.UnknownHelpers))
 	}
+	if len(r.ProcessTree.LearnedEndpoints) > 0 {
+		return AssuranceDegraded, fmt.Sprintf("%d backend endpoint candidate(s) require reviewed routing policy", len(r.ProcessTree.LearnedEndpoints))
+	}
 	if r.Route.Available && r.Route.AgentUnexpected > 0 {
 		return AssuranceDegraded, r.Route.Detail
 	}
@@ -139,6 +142,9 @@ func classifyNetworkAttestation(tunnelActive bool, r NetworkAttestationReport) (
 	}
 	if !r.Egress.Available {
 		return AssurancePartial, "PID and route evidence is healthy, but external egress observation is unavailable"
+	}
+	if !r.Egress.CoverageComplete {
+		return AssurancePartial, "external egress is observed, but independent IPv4/IPv6 TCP/UDP/QUIC coverage is incomplete"
 	}
 	return AssuranceVerified, fmt.Sprintf("%d active Antigravity PID(s) are exactly attributed to vpn-direct and external VPN egress is observable", len(r.PIDRoute.ActiveCandidatePIDs))
 }

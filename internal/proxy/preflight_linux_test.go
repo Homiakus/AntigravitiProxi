@@ -37,3 +37,30 @@ func TestAnalyzeHostRouteConflictsDoesNotWarnForStandardRulesOnly(t *testing.T) 
 		}
 	}
 }
+
+func TestVirtualNetworkManagerMatrix(t *testing.T) {
+	cases := map[string]string{
+		"docker0":  "Docker/container bridge",
+		"br-a1b2":  "Docker/container bridge",
+		"podman0":  "Podman/CNI",
+		"cni0":     "Podman/CNI",
+		"virbr0":   "libvirt",
+		"vboxnet0": "VirtualBox",
+		"vmnet8":   "VMware",
+		"eth0":     "",
+	}
+	for iface, want := range cases {
+		if got := virtualNetworkManager(iface); got != want {
+			t.Errorf("virtualNetworkManager(%q)=%q want %q", iface, got, want)
+		}
+	}
+}
+
+func TestLikelyVPNMatrix(t *testing.T) {
+	for _, iface := range []string{"amn0", "wg0", "tun99", "tailscale0", "wintun0", "eth0"} {
+		want := iface != "eth0"
+		if got := likelyVPNName(iface); got != want {
+			t.Errorf("likelyVPNName(%q)=%v want %v", iface, got, want)
+		}
+	}
+}

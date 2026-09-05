@@ -3,6 +3,7 @@ const csrf = () => document.cookie.split('; ').find(x=>x.startsWith('agp_csrf=')
 const output = $('#output');
 let state = null;
 let assurance = null;
+let diagnostics = null;
 let tunnelTransient = '';
 
 function pretty(v){ return typeof v === 'string' ? v : JSON.stringify(v,null,2); }
@@ -35,6 +36,86 @@ function likelyVPNs(){ return (state?.interfaces||[]).filter(i=>i.likely_vpn && 
 function selectedVPN(){ return String(state?.settings?.vpn_interface||''); }
 function selectedVPNInfo(){ return (state?.interfaces||[]).find(i=>i.name===selectedVPN()) || null; }
 
+function setMetric(id, text, tone=''){
+  const el=$(id);
+  if(!el) return;
+  el.textContent=text;
+  el.dataset.state=tone;
+}
+
+function renderPolicy(){
+  if(!state) return;
+  const banner=$('#policy-banner');
+  const title=$('#policy-title');
+  const detail=$('#policy-detail');
+  const warning=$('#fallback-warning');
+  const fallback=$('#tunnel-domain-fallback') ? !!$('#tunnel-domain-fallback').checked : !!state.settings?.tunnel_domain_fallback;
+  if(warning) warning.hidden=!fallback;
+  if(!banner||!title||!detail) return;
+  banner.classList.remove('strict','relaxed','bad');
+  if(!state.agent_tunnel_supported){
+    banner.classList.add('bad');
+    title.textContent='Agent Tunnel недоступен';
+    detail.textContent='Эта платформа не поддерживает TUN режим.';
+  }else if(state.tunnel_enforcement==='kernel-hard'){
+    banner.classList.add('strict');
+    title.textContent='Kernel hard isolation active';
+    detail.textContent='Antigravity работает в отдельном namespace и cgroup; kernel kill-switch разрешает выход только через выбранный VPN.';
+  }else if(fallback){
+    banner.classList.add('relaxed');
+    title.textContent='Изоляция ослаблена';
+    detail.textContent='Нераспознанные процессы с Google endpoints тоже могут пойти через VPN. Для строгой изоляции выключите fallback ниже.';
+  }else{
+    banner.classList.add('strict');
+    title.textContent='Строгая изоляция включена';
+    detail.textContent='Через VPN пойдут только распознанные процессы и пути Antigravity. Остальные приложения сохраняют system-direct.';
+  }
+}
+
+function renderDiagnostics(v){
+  diagnostics=v;
+  const panel=$('#diagnostics-panel');
+  const summary=$('#diagnostics-summary');
+  if(!summary) return;
+  panel?.classList.remove('loading');
+  const dns=Array.isArray(v?.dns)?v.dns:[];
+  const suspicious=dns.filter(x=>x.suspicious).length;
+  const vpn=(v?.interfaces||[]).filter(x=>x.likely_vpn && interfaceIsUp(x));
+  const ip=v?.public_ip||'не определён';
+  $('#diagnostics-ip').textContent=ip;
+  $('#diagnostics-geo').textContent=v?.public_geo||'внешний geo недоступен';
+  $('#diagnostics-vpns').textContent=vpn.length?vpn.map(x=>x.name).join(', '):'не найдено';
+  $('#diagnostics-interface-note').textContent=vpn.length?'активные VPN-интерфейсы':'подключите VPN перед запуском Tunnel';
+  $('#diagnostics-dns-count').textContent=`${dns.length-suspicious}/${dns.length}`;
+  $('#diagnostics-dns-note').textContent=suspicious?`${suspicious} подозрительных совпадений`:'system ↔ Cloudflare/Google DoH';
+  summary.className='diagnostics-summary '+(suspicious?'bad':(vpn.length?'good':'warn'));
+  summary.textContent=suspicious
+    ? `DNS проверка завершена: ${suspicious} домен(ов) имеют расхождения с trusted DoH.`
+    : `Проверено ${dns.length} домен(ов), ${v?.interfaces?.length||0} интерфейс(ов).`;
+
+  const interfaces=(v?.interfaces||[]).filter(x=>x.flags?.includes('up') || x.likely_vpn);
+  const interfaceRows=interfaces.map(x=>`<div class="diagnostic-row"><strong>${x.likely_vpn?'★ ':''}${esc(x.name)}</strong><span>${esc((x.flags||[]).join(', ')||'down')} · ${esc((x.addresses||[]).join(', ')||'без адреса')}</span></div>`).join('');
+  const dnsRows=dns.map(x=>`<div class="diagnostic-row ${x.suspicious?'suspicious':''}"><strong>${esc(x.domain)}</strong><span>system ${esc((x.system||[]).join(', ')||'—')} · DoH ${esc(Array.from(new Set([...(x.cloudflare||[]),...(x.google||[])])).join(', ')||'—')}${x.suspicious?' · расхождение':''}</span></div>`).join('');
+  $('#diagnostics-details').innerHTML=`<div class="diagnostic-list"><h3>Активные интерфейсы</h3>${interfaceRows||'<div class="diagnostic-empty">Интерфейсы не найдены.</div>'}</div><div class="diagnostic-list"><h3>DNS-сверка</h3>${dnsRows||'<div class="diagnostic-empty">DNS данные недоступны.</div>'}</div>`;
+}
+
+async function refreshDiagnostics(showError=false){
+  const panel=$('#diagnostics-panel');
+  const summary=$('#diagnostics-summary');
+  panel?.classList.add('loading');
+  if(summary) summary.textContent='Проверяю system DNS, trusted DoH и активные интерфейсы…';
+  try{
+    const value=await api('/api/diagnostics');
+    renderDiagnostics(value);
+    return value;
+  }catch(e){
+    panel?.classList.remove('loading');
+    if(summary){ summary.className='diagnostics-summary bad'; summary.textContent=`Диагностика недоступна: ${e.message}`; }
+    if(showError) throw e;
+    return null;
+  }
+}
+
 function setSetupStep(id, mode, label){
   const el=$(id);
   if(!el) return;
@@ -46,6 +127,24 @@ function setSetupStep(id, mode, label){
 
 function renderSetup(){
   if(!state) return;
+  // The supported default workflow is the persistent local proxy. Keep the
+  // more elaborate tunnel indicators out of the normal setup path.
+  setSetupStep('#setup-singbox', state.sing_box_path?'ready':'auto', state.sing_box_path?'READY':'AUTO');
+  setSetupStep('#setup-vpn','ready','НЕ НУЖЕН');
+  setSetupStep('#setup-privileges','ready','НЕ НУЖНЫ');
+  setSetupStep('#setup-runtime',state.proxy_running?'ready':'auto',state.proxy_running?'ЗАПУЩЕН':'ГОТОВ');
+  const simpleOverall=$('#setup-overall');
+  if(simpleOverall){
+    simpleOverall.classList.remove('ready','needs','active');
+    simpleOverall.textContent=state.proxy_running?'PROXY READY':'ONE-CLICK READY';
+    simpleOverall.classList.add(state.proxy_running?'active':'ready');
+  }
+  const simpleNote=$('#setup-note');
+  if(simpleNote) simpleNote.textContent=state.proxy_running
+    ? 'Proxy работает на 127.0.0.1:7890. TUN и системные proxy-настройки не изменяются.'
+    : 'Запустите proxy одним нажатием; дополнительные права и VPN-интерфейс не требуются.';
+  return;
+
   const linux=state.os==='linux';
   const tunnelActive=!!state.agent_tunnel_active;
   const health=String(state?.health?.state||'').toLowerCase();
@@ -105,28 +204,47 @@ function renderSetup(){
     else if(candidates.length>1) help.textContent=`Доступные VPN-кандидаты: ${candidates.map(x=>x.name).join(', ')}`;
     else help.textContent='VPN-кандидат автоматически не найден — выберите интерфейс вручную.';
   }
+  renderPolicy();
 }
 
 async function refresh(){
   state=await api('/api/status');
-  $('#proxy-state').textContent=state.proxy_running?'RUNNING':'OFF';
-  $('#proxy-state').style.color=state.proxy_running?'var(--good)':'var(--muted)';
+  setMetric('#proxy-state',state.proxy_running?'ЗАПУЩЕН':'ВЫКЛЮЧЕН',state.proxy_running?'good':'');
 
   const tunnel=$('#tunnel-state');
   if(!state.agent_tunnel_supported){
-    tunnel.textContent='UNSUPPORTED';
-    tunnel.style.color='var(--bad)';
+    setMetric('#tunnel-state','НЕДОСТУПЕН','bad');
   }else if(state.agent_tunnel_active){
-    tunnel.textContent='ACTIVE';
-    tunnel.style.color='var(--good)';
+    setMetric('#tunnel-state','АКТИВЕН','good');
   }else{
-    tunnel.textContent='OFF';
-    tunnel.style.color='var(--muted)';
+    setMetric('#tunnel-state','ВЫКЛЮЧЕН','');
   }
+  const enforcement=state.tunnel_enforcement||'userspace-soft';
+  setMetric('#tunnel-enforcement', enforcement==='kernel-hard'?'KERNEL HARD':(enforcement==='userspace-soft'?'SOFT POLICY':'INACTIVE'), enforcement==='kernel-hard'?'good':(enforcement==='userspace-soft'?'warn':''));
 
-  $('#ag-state').textContent=state.antigravity_path?'found':'not found';
+  setMetric('#ag-state',state.antigravity_path?'найден':'не найден',state.antigravity_path?'good':'warn');
   $('#platform-state').textContent=`${state.os}/${state.arch}`;
   $('#proxy-url').textContent=state.proxy_url;
+  const summary=$('#system-summary');
+  if(summary){
+    summary.className='system-summary';
+    const journal=state.health?.dimensions?.network_journal;
+    if(journal && !journal.ok){
+      summary.classList.add('bad');
+      summary.textContent='Требуется восстановление сетевого состояния. Запуск Tunnel заблокирован до успешной очистки.';
+    }else if(enforcement==='kernel-hard'){
+      summary.classList.add('good');
+      summary.textContent='KERNEL HARD: Antigravity в отдельном namespace; выход разрешён только через выбранный VPN';
+    }else if(state.agent_tunnel_active && state.health?.state==='healthy'){
+      summary.classList.add('good');
+      summary.textContent='Antigravity → выбранный VPN · остальные приложения → системный маршрут';
+    }else if(state.proxy_running){
+      summary.classList.add('good');
+      summary.textContent='SAFE MODE: системные proxy-настройки не изменены';
+    }else{
+      summary.textContent='Системный маршрут не изменён. Выберите SAFE MODE или Agent Tunnel.';
+    }
+  }
   if($('#tunnel-hint') && !tunnelTransient) $('#tunnel-hint').textContent=state.agent_tunnel_hint||'';
 
   const sel=$('#vpn-interface');
@@ -139,6 +257,7 @@ async function refresh(){
   const fallback=$('#tunnel-domain-fallback');
   if(fallback) fallback.checked=!!state.settings.tunnel_domain_fallback;
   renderSetup();
+  renderPolicy();
 }
 
 function assuranceColor(v){
@@ -158,13 +277,13 @@ function renderAssurance(v){
   const stateEl=$('#assurance-state');
   if(!stateEl) return;
   const level=String(v?.state||'idle').toLowerCase();
-  stateEl.textContent=level.toUpperCase();
+  stateEl.textContent=({verified:'ПОДТВЕРЖДЕНО',degraded:'ПРОБЛЕМА',partial:'ЧАСТИЧНО',idle:'ОЖИДАНИЕ'})[level]||level.toUpperCase();
   stateEl.style.color=assuranceColor(level);
 
   const isolation=String(v?.isolation||'inactive').toLowerCase();
   const isolationEl=$('#assurance-isolation');
   if(isolationEl){
-    isolationEl.textContent=isolation.toUpperCase();
+    isolationEl.textContent=({strict:'СТРОГО','isolation-relaxed':'ОСЛАБЛЕНО',inactive:'ВЫКЛЮЧЕНО'})[isolation]||isolation.toUpperCase();
     isolationEl.style.color=isolationColor(isolation);
   }
   const isolationDetail=$('#assurance-isolation-detail');
@@ -174,16 +293,16 @@ function renderAssurance(v){
   const vpn=v?.pid_route?.vpn_direct_pids?.length||0;
   const ambiguous=v?.pid_route?.ambiguous_connections||0;
   const pidEl=$('#assurance-pids');
-  pidEl.textContent=active?`${vpn}/${active}${ambiguous?` · amb ${ambiguous}`:''}`:'—';
+  pidEl.textContent=active?`${vpn}/${active}${ambiguous?` · неоднозначных ${ambiguous}`:''}`:'—';
   pidEl.style.color=active && vpn===active && !ambiguous?'var(--good)':(ambiguous?'var(--bad)':'var(--muted)');
 
   const egressEl=$('#assurance-egress');
   if(v?.egress?.available){
     const count=v.egress.vpn_observed_ips?.length||0;
-    egressEl.textContent=`PROVEN${count>1?` · ${count} IPs`:''}`;
+    egressEl.textContent=`ПОДТВЕРЖДЁН${count>1?` · ${count} IP`:''}`;
     egressEl.style.color='var(--good)';
   }else{
-    egressEl.textContent='UNAVAILABLE';
+    egressEl.textContent='НЕТ ДАННЫХ';
     egressEl.style.color=level==='degraded'?'var(--bad)':'var(--muted)';
   }
 
@@ -193,7 +312,7 @@ function renderAssurance(v){
     const age=Math.max(0,Math.round((Date.now()-observed.getTime())/1000));
     const until=v.egress_fresh_until?new Date(v.egress_fresh_until):null;
     const left=until?Math.max(0,Math.ceil((until.getTime()-Date.now())/1000)):0;
-    ageEl.textContent=`${v.egress_cached?'cached':'fresh'} · ${age}s${until?` · TTL ${left}s`:''}`;
+    ageEl.textContent=`${v.egress_cached?'кэш':'свежий'} · ${age}с${until?` · TTL ${left}с`:''}`;
   }else{
     ageEl.textContent='—';
   }
@@ -259,6 +378,7 @@ function friendlyTunnelError(message){
   if(l.includes('/dev/net/tun') || l.includes('modprobe')) return `${m}\n\nПроверьте, что ядро поддерживает TUN. На обычном Ubuntu программа сама вызывает modprobe tun через PolicyKit.`;
   if(l.includes('vpn.not_') || l.includes('vpn interface') || l.includes('selected vpn')) return `${m}\n\nПодключите VPN и выберите активный интерфейс в секции «Маршрут».`;
   if(l.includes('routing.ownership_collision') || l.includes('preexisting')) return `${m}\n\nОбнаружено чужое или оставшееся сетевое состояние. Оно не удаляется автоматически без доказанного ownership.`;
+  if(l.includes('network-state') || l.includes('recovery failed') || l.includes('rt netlink')) return `${m}\n\nСначала остановите Agent Tunnel и дождитесь очистки сетевого состояния. Если появится системный запрос — подтвердите его.`;
   return m;
 }
 
@@ -280,7 +400,7 @@ async function action(name){
     }
 
     if(name==='refresh'){
-      await Promise.all([refresh(),refreshAssurance()]);
+      await Promise.all([refresh(),refreshAssurance(),refreshDiagnostics()]);
       return;
     }
     if(name==='clear-output'){
@@ -292,8 +412,10 @@ async function action(name){
       renderAssurance(res);
     }else if(name==='save-config'){
       res=await saveConfigFromUI();
+      const saveStatus=$('#save-status');
+      if(saveStatus){ saveStatus.textContent='Сохранено'; saveStatus.classList.remove('error'); setTimeout(()=>{saveStatus.textContent='';},3000); }
     }else if(name==='diagnostics'){
-      res=await api('/api/diagnostics');
+      res=await refreshDiagnostics(true);
     }else if(name==='agent-doctor'){
       res=await api('/api/agent-doctor');
     }else if(name==='logs'){
@@ -314,6 +436,8 @@ async function action(name){
   }catch(e){
     const message=friendlyTunnelError(e?.message||e||'unknown error');
     setOutput('ERROR\n'+message);
+    const saveStatus=$('#save-status');
+    if(name==='save-config' && saveStatus){ saveStatus.textContent='Не сохранено'; saveStatus.classList.add('error'); }
     if(tunnelAction){
       setTunnelHint('Agent Tunnel НЕ запущен: '+message.split('\n')[0]);
       const panel=$('#agent-tunnel-panel');
@@ -337,17 +461,18 @@ document.addEventListener('change',e=>{
     const help=$('#vpn-help');
     if(help) help.textContent=info?`${info.flags?.includes('up')?'Активен':'DOWN'} · ${(info.addresses||[]).join(', ')}`:'Автоматический выбор будет выполнен при запуске Tunnel.';
   }
+  if(e.target?.id==='tunnel-domain-fallback') renderPolicy();
 });
 
 function connectEvents(){
   const es=new EventSource('/api/events');
   es.onopen=()=>{
     $('#live-dot').classList.add('on');
-    $('#live-text').textContent='live';
+    $('#live-text').textContent='связь активна';
   };
   es.onerror=()=>{
     $('#live-dot').classList.remove('on');
-    $('#live-text').textContent='reconnect…';
+    $('#live-text').textContent='переподключение…';
   };
   es.onmessage=e=>{
     try{
@@ -363,7 +488,7 @@ function connectEvents(){
 }
 
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
-Promise.all([refresh(),refreshAssurance()]).catch(e=>setOutput(e.message));
+Promise.all([refresh(),refreshAssurance(),refreshDiagnostics()]).catch(e=>setOutput(e.message));
 connectEvents();
 setInterval(()=>{
   refresh().catch(()=>{});

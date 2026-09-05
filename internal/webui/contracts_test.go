@@ -19,8 +19,10 @@ func TestDomainFallbackControlIsWiredThroughUI(t *testing.T) {
 
 	for _, want := range []string{
 		`id="tunnel-domain-fallback"`,
-		`Domain fallback`,
-		`слабее process isolation`,
+		`Разрешить fallback по домену`,
+		`Fallback ослабляет изоляцию`,
+		`id="policy-banner"`,
+		`id="fallback-warning"`,
 		`id="assurance-isolation"`,
 		`id="assurance-isolation-detail"`,
 	} {
@@ -58,8 +60,14 @@ func TestOneClickTunnelSetupIsVisibleAndWired(t *testing.T) {
 		`id="setup-vpn"`,
 		`id="setup-privileges"`,
 		`id="setup-runtime"`,
-		`Подготовить Tunnel и запустить IDE`,
-		`PolicyKit`,
+		`Подготовить и запустить Antigravity`,
+		`Запустить Tunnel без IDE`,
+		`id="system-summary"`,
+		`id="save-status"`,
+		`id="diagnostics-panel"`,
+		`id="diagnostics-ip"`,
+		`id="diagnostics-details"`,
+		`системное окно авторизации`,
 		`Пароль не читается и не хранится`,
 	} {
 		if !strings.Contains(html, want) {
@@ -74,6 +82,8 @@ func TestOneClickTunnelSetupIsVisibleAndWired(t *testing.T) {
 		`await api('/api/actions/stop',{method:'POST'})`,
 		`PolicyKit-диалог`,
 		`function friendlyTunnelError`,
+		`async function refreshDiagnostics`,
+		`api('/api/diagnostics')`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js is missing one-click setup contract marker %q", want)

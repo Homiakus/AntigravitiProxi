@@ -34,9 +34,13 @@ func TestAgentTunnelSchemaWithPinnedSingBox(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	bin, err := m.Install(ctx)
-	if err != nil {
-		t.Fatalf("install pinned sing-box: %v", err)
+	bin := os.Getenv("AGP_SINGBOX_BIN")
+	if bin == "" {
+		var err error
+		bin, err = m.Install(ctx)
+		if err != nil {
+			t.Fatalf("install pinned sing-box: %v", err)
+		}
 	}
 
 	path := filepath.Join(root, "agent-tunnel-check.json")

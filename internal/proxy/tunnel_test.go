@@ -123,6 +123,12 @@ func TestAgentTunnelConfigIsProcessAwareAndNonGlobal(t *testing.T) {
 	}
 }
 
+func TestDefaultAgentTunnelOptionsUseStrictProcessIsolation(t *testing.T) {
+	if got := DefaultAgentTunnelOptions().DomainFallback; got {
+		t.Fatal("domain fallback must be opt-in so unrelated Google traffic stays on system-direct")
+	}
+}
+
 func TestAgentTunnelRequiresExplicitVPNInterface(t *testing.T) {
 	cfg := Config{Root: t.TempDir(), Host: "127.0.0.1", Port: 7890}
 	err := writeAgentTunnelConfig(cfg, filepath.Join(cfg.Root, "tunnel.json"), DefaultAgentTunnelOptions())
@@ -156,6 +162,40 @@ func TestAgentTunnelCanDisableDomainFallback(t *testing.T) {
 			t.Fatalf("domain fallback rule unexpectedly present: %#v", rule)
 		}
 	}
+}
+
+func TestReviewedLearnedDomainIsNarrowlyRouted(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "tunnel.json")
+	cfg := Config{Root: root, Host: "127.0.0.1", Port: 7890, VPNInterface: "VPN"}
+	opts := DefaultAgentTunnelOptions()
+	opts.DomainFallback = true
+	opts.TargetDomains = append(opts.TargetDomains, "reviewed-backend.example")
+	if err := writeAgentTunnelConfig(cfg, path, opts); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	rules := doc["route"].(map[string]any)["rules"].([]any)
+	for _, raw := range rules {
+		rule := raw.(map[string]any)
+		if rule["outbound"] == "vpn-direct" {
+			if domains, ok := rule["domain"].([]any); ok {
+				for _, domain := range domains {
+					if domain == "reviewed-backend.example" {
+						return
+					}
+				}
+			}
+		}
+	}
+	t.Fatal("reviewed endpoint was not present in the narrow vpn-direct domain rule")
 }
 
 // CI sets AGP_SINGBOX_BIN to the official pinned binary. Keeping this test

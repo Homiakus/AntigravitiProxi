@@ -2,7 +2,12 @@
 
 package proxy
 
-import "testing"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestPreflightPlatformNetworkOwnershipRejectsReservedRouteTable(t *testing.T) {
 	s := NetworkSnapshot{
@@ -48,5 +53,20 @@ func TestReservedPlatformOwnershipCoversConfiguredLinuxNamespace(t *testing.T) {
 	}
 	if d.NewRulePrioritiesV4[0] != linuxTunnelRuleStart || d.NewRulePrioritiesV4[len(d.NewRulePrioritiesV4)-1] != linuxTunnelRuleEnd {
 		t.Fatalf("unexpected IPv4 priority bounds: %#v", d.NewRulePrioritiesV4)
+	}
+}
+
+func TestCleanNetworkRecoveryDoesNotRequirePrivilegedMutation(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\ncase \"$*\" in\n  *del*|*flush*) echo 'unexpected privileged mutation' >&2; exit 1;;\nesac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "ip"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	if err := deleteRulePriority(context.Background(), "-4", 19000); err != nil {
+		t.Fatal(err)
+	}
+	if err := flushRouteTable(context.Background(), "-6", "20229"); err != nil {
+		t.Fatal(err)
 	}
 }

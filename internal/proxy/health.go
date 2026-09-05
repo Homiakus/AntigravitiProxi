@@ -52,6 +52,13 @@ func (m *Manager) Health() HealthSnapshot {
 	}
 
 	owned, listenerDetail := m.ManagedListenerOwned()
+	m.mu.Lock()
+	readinessFallback := m.proxyReadinessFallback
+	m.mu.Unlock()
+	if !owned && readinessFallback && mode == ModeProxy && m.Running() {
+		owned = true
+		listenerDetail = "managed proxy is reachable; /proc listener ownership proof unavailable"
+	}
 	h.Dimensions["mixed_listener_owned"] = HealthDimension{OK: owned, Detail: listenerDetail}
 
 	if mode == ModeProxy {

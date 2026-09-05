@@ -154,7 +154,7 @@ func LaunchWithProxy(exe, httpProxy, socksProxy string) error {
 	}
 
 	cmd := exec.Command(exe)
-	env := processProxyEnv(os.Environ(), httpProxy, socksProxy)
+	env := LaunchEnvironment(httpProxy, socksProxy)
 	preparedEnv, err := prepareLaunchCommand(cmd, env)
 	if err != nil {
 		return err
@@ -164,6 +164,12 @@ func LaunchWithProxy(exe, httpProxy, socksProxy string) error {
 		return err
 	}
 	return cmd.Process.Release()
+}
+
+// LaunchEnvironment builds the process-scoped environment used by either the
+// soft proxy launcher or the Linux kernel-hard launcher.
+func LaunchEnvironment(httpProxy, socksProxy string) []string {
+	return processProxyEnv(os.Environ(), httpProxy, socksProxy)
 }
 
 func processProxyEnv(base []string, httpProxy, socksProxy string) []string {

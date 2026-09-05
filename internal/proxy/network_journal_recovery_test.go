@@ -88,6 +88,19 @@ func TestDecodeTunnelJournalRejectsUnknownPhaseAndMissingOperationID(t *testing.
 	}
 }
 
+func TestPlatformProcessIdentityDistinguishesCurrentProcess(t *testing.T) {
+	identity, err := platformProcessIdentity(os.Getpid())
+	if err != nil {
+		t.Fatalf("current process identity: %v", err)
+	}
+	if identity == "" {
+		t.Fatal("current process identity is empty")
+	}
+	if _, err := platformProcessIdentity(-1); err == nil {
+		t.Fatal("negative PID unexpectedly accepted")
+	}
+}
+
 func TestPersistCleanJournalRemovesOpenAndPreviousGood(t *testing.T) {
 	m := New(Config{Root: t.TempDir()}, nil)
 	j := &TunnelStateJournal{

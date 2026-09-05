@@ -14,7 +14,7 @@
       <div>
         <div class="eyebrow">ANTIGRAVITY NETWORK CONTROL PLANE</div>
         <h1>AntigravitiProxi</h1>
-        <p>Безопасный двухуровневый транспорт: сначала SAFE MODE, при необходимости — автоматически подготовленный process-aware Agent Tunnel.</p>
+        <p>Маршрутизируйте только Antigravity через выбранный VPN. Остальные приложения сохраняют обычный системный маршрут.</p>
       </div>
       <div class="live" aria-live="polite"><span id="live-dot" class="dot"></span><span id="live-text">подключение…</span></div>
     </header>
@@ -26,10 +26,12 @@
           <div class="status-grid">
             <div class="metric"><span>Local proxy</span><strong id="proxy-state">—</strong></div>
             <div class="metric"><span>Agent Tunnel</span><strong id="tunnel-state">—</strong></div>
+            <div class="metric"><span>Enforcement</span><strong id="tunnel-enforcement">—</strong></div>
             <div class="metric"><span>Antigravity</span><strong id="ag-state">—</strong></div>
             <div class="metric"><span>Платформа</span><strong id="platform-state">—</strong></div>
           </div>
           <div class="endpoint mono" id="proxy-url">http://127.0.0.1:7890</div>
+          <div class="system-summary" id="system-summary" role="status">Проверяю состояние…</div>
         </article>
 
         <article class="panel safe-panel">
@@ -38,6 +40,20 @@
           <p>Process-only proxy без изменения WinINET/WinHTTP и системного proxy. Подходит как первый режим и не вмешивается в сеть других приложений.</p>
           <button class="primary big" data-action="safe">Запустить SAFE MODE</button>
         </article>
+      </section>
+
+      <section class="panel diagnostics-panel" id="diagnostics-panel">
+        <div class="panel-title">
+          <div><div class="section-kicker">Сразу после открытия</div><span>Диагностика сети</span></div>
+          <button class="ghost" data-action="diagnostics">Обновить</button>
+        </div>
+        <div class="diagnostics-summary" id="diagnostics-summary" role="status">Загружаю диагностику DNS и интерфейсов…</div>
+        <div class="diagnostics-grid">
+          <div class="diagnostic-card"><span>Внешний IP</span><strong id="diagnostics-ip">—</strong><small id="diagnostics-geo">ожидание</small></div>
+          <div class="diagnostic-card"><span>VPN-интерфейсы</span><strong id="diagnostics-vpns">—</strong><small id="diagnostics-interface-note">проверка интерфейсов</small></div>
+          <div class="diagnostic-card"><span>DNS проверки</span><strong id="diagnostics-dns-count">—</strong><small id="diagnostics-dns-note">system ↔ DoH</small></div>
+        </div>
+        <div class="diagnostic-details" id="diagnostics-details"></div>
       </section>
 
       <section class="panel tunnel-panel" id="agent-tunnel-panel">
@@ -49,7 +65,12 @@
           <span class="badge tunnel-badge">Transparent transport</span>
         </div>
 
-        <p class="tunnel-copy">Для случая, когда OAuth/регистрация работают, а агент завершается с <span class="mono">Agent execution terminated due to error</span>. На Linux подготовка теперь выполняется автоматически: приложение проверит TUN, при необходимости загрузит модуль, установит capability tooling и через системный PolicyKit запросит только узкие права для managed sing-box.</p>
+        <p class="tunnel-copy">Используйте после успешного входа, если агент игнорирует proxy и завершается с <span class="mono">Agent execution terminated due to error</span>. Tunnel направляет через VPN только процессы и пути Antigravity; системный proxy и маршруты других приложений не меняются.</p>
+
+        <div class="policy-banner strict" id="policy-banner" role="status">
+          <span class="policy-icon" aria-hidden="true">✓</span>
+          <div><strong id="policy-title">Строгая изоляция включена</strong><p id="policy-detail">Через VPN пойдут только распознанные процессы Antigravity. Domain fallback выключен.</p></div>
+        </div>
 
         <div class="setup-card">
           <div class="setup-head">
@@ -61,22 +82,22 @@
           </div>
           <div class="setup-steps">
             <div class="setup-step" id="setup-singbox"><span class="setup-dot"></span><div><strong>sing-box</strong><small>verified managed binary</small></div><b>—</b></div>
-            <div class="setup-step" id="setup-vpn"><span class="setup-dot"></span><div><strong>VPN</strong><small>явный upstream interface</small></div><b>—</b></div>
-            <div class="setup-step" id="setup-privileges"><span class="setup-dot"></span><div><strong>Права Linux</strong><small>TUN + process attribution</small></div><b>—</b></div>
-            <div class="setup-step" id="setup-runtime"><span class="setup-dot"></span><div><strong>Runtime</strong><small>TUN / listener / VPN evidence</small></div><b>—</b></div>
+            <div class="setup-step" id="setup-vpn"><span class="setup-dot"></span><div><strong>Сеть</strong><small>обычный системный маршрут</small></div><b>—</b></div>
+            <div class="setup-step" id="setup-privileges"><span class="setup-dot"></span><div><strong>Права</strong><small>не требуются для proxy</small></div><b>—</b></div>
+            <div class="setup-step" id="setup-runtime"><span class="setup-dot"></span><div><strong>Proxy</strong><small>локальный порт 7890</small></div><b>—</b></div>
           </div>
-          <div class="setup-note" id="setup-note">Выберите VPN-интерфейс ниже. Остальное программа подготовит автоматически при запуске Tunnel.</div>
+          <div class="setup-note" id="setup-note">Локальный proxy запускается без TUN, policy routes и системных запросов.</div>
         </div>
 
-        <div class="tunnel-flow mono" aria-label="Agent Tunnel data path"><span>Antigravity</span><b>→</b><span>TUN</span><b>→</b><span>process policy</span><b>→</b><span>DoH</span><b>→</b><span>VPN</span><b>→</b><span>Google</span></div>
+        <div class="tunnel-flow mono" aria-label="Local proxy data path"><span>Antigravity</span><b>→</b><span>127.0.0.1:7890</span><b>→</b><span>DoH</span><b>→</b><span>Google</span></div>
 
         <div class="button-row tunnel-actions">
-          <button class="primary big" data-action="tunnel/launch">Подготовить Tunnel и запустить IDE</button>
-          <button class="secondary" data-action="tunnel/start">Подготовить / поднять без IDE</button>
-          <button class="danger-soft" data-action="tunnel/stop">Остановить</button>
+          <button class="primary big" data-action="safe">Запустить proxy и Antigravity</button>
+          <button class="secondary" data-action="start">Запустить proxy</button>
+          <button class="danger-soft" data-action="stop">Остановить proxy</button>
           <button data-action="agent-doctor">Agent Doctor</button>
         </div>
-        <div class="hint hint-box" id="tunnel-hint" aria-live="polite">Linux: при первом запуске может появиться системный PolicyKit-диалог для выдачи минимальных capabilities managed sing-box.</div>
+        <div class="hint hint-box" id="tunnel-hint" aria-live="polite">Antigravity и Cockpit Tools используют локальный proxy на 127.0.0.1:7890.</div>
       </section>
 
       <section class="panel route-panel">
@@ -88,9 +109,10 @@
           <label class="check"><input id="auto-open" type="checkbox"><span>Автооткрытие UI</span></label>
         </div>
         <div class="advanced-row">
-          <label class="check compact"><input id="tunnel-domain-fallback" type="checkbox"><span>Domain fallback для Google endpoints <small>совместимее с неизвестными helper, но слабее process isolation</small></span></label>
+          <label class="check compact"><input id="tunnel-domain-fallback" type="checkbox"><span>Разрешить fallback по домену <small>совместимее с неизвестными helper, но другие приложения тоже могут попасть в VPN для Google endpoints</small></span></label>
+          <div class="policy-warning" id="fallback-warning" hidden>Fallback ослабляет изоляцию приложения. Включайте его только если строгий режим не видит нужный helper.</div>
         </div>
-        <div class="button-row"><button class="secondary" data-action="save-config">Сохранить маршрут</button></div>
+        <div class="button-row"><button class="secondary" data-action="save-config">Сохранить настройки</button><span class="save-status" id="save-status" role="status"></span></div>
       </section>
 
       <section class="panel assurance-panel">
@@ -98,7 +120,7 @@
           <div><div class="section-kicker">После запуска</div><span>Runtime network assurance</span></div>
           <button class="ghost" data-action="attestation">Показать evidence</button>
         </div>
-        <p class="tunnel-copy">Проверка цепочки <span class="mono">process tree → live socket/PID → sing-box outbound → vpn-direct → внешний egress</span>. Маршрутная доказанность и ширина policy показываются отдельно.</p>
+        <p class="tunnel-copy">Проверяем цепочку <span class="mono">process tree → PID/socket → sing-box → VPN → внешний egress</span>. Наличие Tunnel само по себе ещё не означает, что маршрут Antigravity подтверждён.</p>
         <div class="status-grid assurance-grid">
           <div class="metric"><span>Assurance</span><strong id="assurance-state">—</strong></div>
           <div class="metric"><span>Isolation</span><strong id="assurance-isolation">—</strong></div>

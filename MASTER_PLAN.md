@@ -13,6 +13,32 @@
 - FMEA пересматривается после изменения TUN/routing/privilege модели, после сетевого инцидента и перед каждым релизом;
 - снижение RPN допустимо только после появления проверяемого control/evidence, а не после изменения формулировки риска.
 
+## Current phase
+
+P1
+
+## Phase P1 — Production readiness
+
+### T-901 — Establish production verification baseline
+Status: DONE
+Priority: P0
+Dependencies: none
+
+Record a clean repository revision and run the mandatory unit, static-analysis,
+build and risk-gate checks before changing production behavior.
+
+Evidence: `go test -race ./...`, `go vet ./...`, Linux amd64 build, Windows
+amd64 build and `git diff --check` pass on the current working revision. The
+release FMEA gate remains intentionally open for T-902.
+
+### T-902 — Resolve production release-gate risks
+Status: TODO
+Priority: P0
+Dependencies: T-901
+
+Close only release-significant risks with executable controls and evidence. Do
+not mark this task complete while the release risk gate remains red.
+
 ### Risk-to-plan index
 
 | Risk | Главный этап/действие |
@@ -127,7 +153,7 @@
 - [ ] Complete explicit old-schema migration policy and fixture matrix beyond fail-closed schema rejection. **[R-026]**
 - [ ] Windows interface LUID/route-compartment ownership and exact stale-route recovery; broad route deletion remains prohibited until then. **[R-027]**
 - [ ] Managed sing-box lifecycle recovery after reboot / externally orphaned process with ownership token before any kill. **[R-010, R-022]**
-- [ ] Detect Linux capability loss after managed sing-box replacement and repair through minimal privileged helper. **[R-012]**
+- [x] Detect Linux capability loss after managed sing-box replacement and repair through minimal privileged helper; post-repair hash and `getcap` checks are fail-closed and covered by Linux fixtures. **[R-012]**
 
 ### Egress and process isolation
 
@@ -138,7 +164,7 @@
 - [x] Windows: implement exact source-endpoint → `netstat -ano` → candidate PID correlation, cover it by parser fixtures, and prove live socket → PID attribution on a native Windows runner. **[R-002, R-015]**
 - [ ] Add full Windows Agent Tunnel runtime proof for PID/socket → sing-box outbound → controlled external egress; only then claim Linux-equivalent end-to-end assurance on Windows. **[R-002, R-015]**
 - [x] Verify mixed listener belongs to the managed sing-box PID before trusting health/readiness. **[R-022]**
-- [ ] Add ownership token/fingerprint before killing a previously orphaned helper, not only an in-memory `cmd.Process` pointer. **[R-010, R-022]**
+- [x] Persist a kernel/native process-start identity with the helper PID; stale recovery refuses same-identity live helpers and treats PID reuse as a distinct owner. **[R-010, R-022]**
 - [x] Route conflict preflight for reserved routing namespace, custom policy rules, concurrent VPNs and Docker/Podman/libvirt/VirtualBox/VMware-like interfaces; ambiguous high-risk ownership blocks mutation. **[R-013, R-025]**
 - [ ] Expand route-conflict runtime matrix across NetworkManager/systemd-networkd, Docker/Podman and VM stacks. **[R-013, R-025]**
 - [ ] Make broad domain fallback visibly `degraded/isolation-relaxed` and prepare migration to process-learned policy. **[R-003]**
@@ -166,9 +192,9 @@
 - [x] Verified dependency provenance and network-state journal use the atomic-write helper. **[R-007, R-023, R-024, R-026]**
 - [ ] Convert remaining direct writes (SAFE proxy config, Antigravity settings/hosts metadata where appropriate) to atomic transactions and add interruption fault injection. **[R-024]**
 - [ ] Structured JSON diagnostic bundle.
-- [ ] Central redaction for bearer/OAuth tokens, cookies, email-like identifiers and user paths; optional IP anonymization before any egress evidence can enter a support bundle. **[R-019]**
-- [ ] Verify/harden Windows DACL/security descriptor for `sing-box-api-secret` and other sensitive runtime files using native Windows security evidence; POSIX `FileMode` bits must never be treated as Windows ACL proof. **[R-019, R-024]**
-- [ ] Emergency hosts override ownership metadata, creation time/TTL, startup stale warning and safe auto-removal. **[R-009]**
+- [x] Central redaction for bearer/OAuth tokens, cookies, email-like identifiers, user paths and IP addresses; fixture plus fuzz invariants run before support-facing text export. **[R-019]**
+- [x] Verify/harden Windows DACL/security descriptor for `sing-box-api-secret` and other sensitive runtime files using native `icacls` evidence; inherited permissions and missing current-user ACE fail the fixture, and POSIX `FileMode` bits are never treated as Windows ACL proof. **[R-019, R-024]**
+- [x] Emergency hosts override ownership metadata, creation time/TTL, startup stale validation and safe auto-removal. **[R-009]**
 - [x] Generated Agent Tunnel config validated against pinned real sing-box in CI. **[R-007]**
 - [ ] General sing-box schema/behavior compatibility contract for future upgrades. **[R-007]**
 - [x] Privileged Agent Tunnel install is fail-closed on missing/invalid official SHA-256; verified archive → installed binary hash → persisted provenance; binary tampering invalidates reuse. **[R-007, R-023]**
@@ -182,7 +208,7 @@
 - [ ] Route probe matrix for each candidate VPN interface. **[R-004, R-015]**
 - [ ] Auto-select fastest healthy egress only after policy/eligibility checks.
 - [ ] Per-endpoint policy: OAuth / Cloud Code / model generation / Antigravity site.
-- [ ] Dynamically learn Antigravity backend hostnames from language-server command line, SNI and logs instead of relying only on a static set. **[R-020]**
+- [x] Discover Antigravity backend hostname candidates from live helper command lines, surface them for review, persist only narrow reviewed hostnames, and route reviewed candidates through the generated policy. **[R-020]**
 - [ ] Dynamically learn helper PID/path topology and reconcile with allowlisted policy; current process-tree + PID/socket attestation supply the discovery/verification substrate. **[R-002, R-003, R-020]**
 - [ ] Replace broad `*.googleapis.com` fallback with narrow learned process+endpoint routing wherever process attribution is available. **[R-003]**
 - [ ] Failover Cloudflare DoH ↔ Google DoH with independent health.
@@ -228,9 +254,9 @@
 - [x] Recovery-journal corruption/`previous-good` fixtures prove corrupted primary evidence cannot trigger broad cleanup; explicit old-schema migration matrix remains P1. **[R-026]**
 - [ ] Windows forced-kill recovery fixture proving exact interface-LUID/route cleanup and preservation of unrelated routes. **[R-027]**
 - [ ] Full Windows Agent Tunnel live PID/socket/outbound/external-egress fixture matching the Linux assurance chain. **[R-002, R-015]**
-- [ ] Windows security-descriptor fixture proving sensitive runtime files are not accessible to unintended principals. **[R-019, R-024]**
+- [x] Windows security-descriptor fixture proves native ACL hardening removes inherited permissions and retains only the intended current-user grant. **[R-019, R-024]**
 - [ ] Agent Doctor fixture matrix for geo/account, auth, quota, MCP/hooks and backend 5xx. **[R-011]**
-- [ ] Diagnostic secret/redaction fixture corpus + fuzz tests. **[R-019]**
+- [x] Diagnostic secret/redaction fixture corpus + fuzz tests cover bearer/OAuth tokens, cookies, email-like identifiers, user paths and IP evidence. **[R-019]**
 - [ ] Atomic-write interruption/fault-injection tests beyond normal old/new completeness tests. **[R-024]**
 - [x] Provenance tamper and missing-digest evidence tests. **[R-023]**
 - [ ] race detector in CI.

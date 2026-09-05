@@ -36,7 +36,7 @@ func TestClassifyIsolationPolicy(t *testing.T) {
 func TestClassifyNetworkAttestation(t *testing.T) {
 	base := NetworkAttestationReport{
 		ProcessTree: antigravity.ProcessTreeReport{
-			Complete: true,
+			Complete:  true,
 			Processes: []antigravity.ProcessInfo{{PID: 101, Name: "Antigravity.exe", Known: true}},
 		},
 		Route: proxy.RouteAttestation{
@@ -50,7 +50,7 @@ func TestClassifyNetworkAttestation(t *testing.T) {
 			ActiveCandidatePIDs: []int{101},
 			VPNDirectPIDs:       []int{101},
 		},
-		Egress: proxy.PublicEgressAttestation{Available: true},
+		Egress: proxy.PublicEgressAttestation{Available: true, CoverageComplete: true},
 	}
 
 	cases := []struct {
@@ -62,15 +62,33 @@ func TestClassifyNetworkAttestation(t *testing.T) {
 		{name: "inactive", active: false, want: AssuranceIdle},
 		{name: "verified", active: true, want: AssuranceVerified},
 		{name: "incomplete-tree", active: true, mutate: func(r *NetworkAttestationReport) { r.ProcessTree.Complete = false }, want: AssuranceDegraded},
-		{name: "unknown-helper", active: true, mutate: func(r *NetworkAttestationReport) { r.ProcessTree.UnknownHelpers = []antigravity.ProcessInfo{{PID: 102, Known: false}} }, want: AssuranceDegraded},
+		{name: "unknown-helper", active: true, mutate: func(r *NetworkAttestationReport) {
+			r.ProcessTree.UnknownHelpers = []antigravity.ProcessInfo{{PID: 102, Known: false}}
+		}, want: AssuranceDegraded},
+		{name: "unreviewed-endpoint", active: true, mutate: func(r *NetworkAttestationReport) {
+			r.ProcessTree.LearnedEndpoints = []string{"new-backend.example"}
+		}, want: AssuranceDegraded},
 		{name: "unexpected-runtime-route", active: true, mutate: func(r *NetworkAttestationReport) { r.Route.AgentUnexpected = 1; r.Route.Detail = "unexpected" }, want: AssuranceDegraded},
-		{name: "unexpected-pid-route", active: true, mutate: func(r *NetworkAttestationReport) { r.PIDRoute.UnexpectedPIDs = []int{101}; r.PIDRoute.Detail = "unexpected pid" }, want: AssuranceDegraded},
-		{name: "ambiguous-owner", active: true, mutate: func(r *NetworkAttestationReport) { r.PIDRoute.AmbiguousConnections = 1; r.PIDRoute.Detail = "ambiguous" }, want: AssuranceDegraded},
+		{name: "unexpected-pid-route", active: true, mutate: func(r *NetworkAttestationReport) {
+			r.PIDRoute.UnexpectedPIDs = []int{101}
+			r.PIDRoute.Detail = "unexpected pid"
+		}, want: AssuranceDegraded},
+		{name: "ambiguous-owner", active: true, mutate: func(r *NetworkAttestationReport) {
+			r.PIDRoute.AmbiguousConnections = 1
+			r.PIDRoute.Detail = "ambiguous"
+		}, want: AssuranceDegraded},
 		{name: "no-process", active: true, mutate: func(r *NetworkAttestationReport) { r.ProcessTree.Processes = nil }, want: AssurancePartial},
 		{name: "route-unavailable", active: true, mutate: func(r *NetworkAttestationReport) { r.Route.Available = false }, want: AssurancePartial},
-		{name: "idle-process", active: true, mutate: func(r *NetworkAttestationReport) { r.PIDRoute.ActiveCandidatePIDs = nil; r.PIDRoute.VPNDirectPIDs = nil }, want: AssurancePartial},
-		{name: "active-not-all-vpn", active: true, mutate: func(r *NetworkAttestationReport) { r.PIDRoute.ActiveCandidatePIDs = []int{101, 102}; r.PIDRoute.VPNDirectPIDs = []int{101} }, want: AssuranceDegraded},
+		{name: "idle-process", active: true, mutate: func(r *NetworkAttestationReport) {
+			r.PIDRoute.ActiveCandidatePIDs = nil
+			r.PIDRoute.VPNDirectPIDs = nil
+		}, want: AssurancePartial},
+		{name: "active-not-all-vpn", active: true, mutate: func(r *NetworkAttestationReport) {
+			r.PIDRoute.ActiveCandidatePIDs = []int{101, 102}
+			r.PIDRoute.VPNDirectPIDs = []int{101}
+		}, want: AssuranceDegraded},
 		{name: "observer-unavailable", active: true, mutate: func(r *NetworkAttestationReport) { r.Egress.Available = false }, want: AssurancePartial},
+		{name: "observer-coverage-incomplete", active: true, mutate: func(r *NetworkAttestationReport) { r.Egress.CoverageComplete = false }, want: AssurancePartial},
 	}
 
 	for _, tc := range cases {
@@ -95,7 +113,7 @@ func TestClassifyNetworkAttestation(t *testing.T) {
 func TestVerifiedRouteEvidenceDoesNotHideRelaxedIsolation(t *testing.T) {
 	state, detail := classifyNetworkAttestation(true, NetworkAttestationReport{
 		ProcessTree: antigravity.ProcessTreeReport{
-			Complete: true,
+			Complete:  true,
 			Processes: []antigravity.ProcessInfo{{PID: 101, Name: "Antigravity.exe", Known: true}},
 		},
 		Route: proxy.RouteAttestation{Available: true, AgentObserved: 1, AgentVPNDirect: 1},
@@ -105,7 +123,7 @@ func TestVerifiedRouteEvidenceDoesNotHideRelaxedIsolation(t *testing.T) {
 			ActiveCandidatePIDs: []int{101},
 			VPNDirectPIDs:       []int{101},
 		},
-		Egress: proxy.PublicEgressAttestation{Available: true},
+		Egress: proxy.PublicEgressAttestation{Available: true, CoverageComplete: true},
 	})
 	if state != AssuranceVerified {
 		t.Fatalf("route evidence state=%q want verified; detail=%q", state, detail)

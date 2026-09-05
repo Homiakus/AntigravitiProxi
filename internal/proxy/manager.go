@@ -45,11 +45,13 @@ type Config struct {
 }
 
 type Manager struct {
-	mu     sync.Mutex
-	cfg    Config
-	cmd    *exec.Cmd
-	logger Logger
-	mode   Mode
+	mu                     sync.Mutex
+	cfg                    Config
+	cmd                    *exec.Cmd
+	hardCmd                *exec.Cmd
+	logger                 Logger
+	mode                   Mode
+	proxyReadinessFallback bool
 }
 
 type release struct {
@@ -112,6 +114,15 @@ func (m *Manager) Mode() Mode {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.mode
+}
+
+// MarkProxyReadinessFallback records that the ordinary local proxy was
+// reachable while /proc socket attribution was unavailable. This is only for
+// the non-tunnel proxy mode; Agent Tunnel retains strict ownership checks.
+func (m *Manager) MarkProxyReadinessFallback() {
+	m.mu.Lock()
+	m.proxyReadinessFallback = true
+	m.mu.Unlock()
 }
 
 func (m *Manager) ManagedRunning() bool {
@@ -421,6 +432,7 @@ func (m *Manager) startLocked(ctx context.Context, configPath string, mode Mode,
 	}
 	m.cmd = cmd
 	m.mode = mode
+	m.proxyReadinessFallback = false
 
 	go func() {
 		err := cmd.Wait()
@@ -455,11 +467,19 @@ func (m *Manager) Start(ctx context.Context) error {
 func (m *Manager) Stop() error {
 	m.mu.Lock()
 	cmd := m.cmd
+	hardCmd := m.hardCmd
 	m.mu.Unlock()
-	if cmd == nil || cmd.Process == nil {
-		return nil
+	if cmd != nil && cmd.Process != nil {
+		if err := stopManagedProcess(cmd.Process); err != nil {
+			return err
+		}
 	}
-	return stopManagedProcess(cmd.Process)
+	if hardCmd != nil && hardCmd.Process != nil {
+		if err := hardCmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return err
+		}
+	}
+	return nil
 }
 
 // Running reports whether the local mixed diagnostic port is reachable. Both

@@ -224,3 +224,37 @@ jobs:
         with:
           name: antigraviti-proxi-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/*
+
+  cross-build-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+      - name: Compile all platform packages and tests
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          set -euo pipefail
+          n=0
+          while read -r pkg; do
+            go test -c "$pkg" -o "/tmp/agp-cross-test-${n}${GOOS:+.exe}"
+            n=$((n + 1))
+          done < <(go list ./...)
+          go build -trimpath ./cmd/antigraviti-proxi

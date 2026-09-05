@@ -39,7 +39,7 @@ func TestTunnelSettingsContractIsExhaustive(t *testing.T) {
 		}
 	}
 	sort.Strings(got)
-	want := []string{"TunnelDomainFallback", "TunnelStrictRoute"}
+	want := []string{"TunnelDomainFallback", "TunnelLearnedDomains", "TunnelStrictRoute"}
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("tunnel Settings fields=%v want=%v; every new Tunnel* setting needs an explicit runtime contract test", got, want)
@@ -54,6 +54,15 @@ func TestTunnelDomainFallbackFlowsToRuntimeOptions(t *testing.T) {
 		if o.DomainFallback != value {
 			t.Fatalf("TunnelDomainFallback=%v produced DomainFallback=%v", value, o.DomainFallback)
 		}
+	}
+}
+
+func TestReviewedLearnedDomainsFlowToRuntimeOptions(t *testing.T) {
+	s := &Server{settings: defaultSettings()}
+	s.settings.TunnelLearnedDomains = []string{"new-backend.example"}
+	o := s.tunnelOptions()
+	if len(o.TargetDomains) == 0 || o.TargetDomains[len(o.TargetDomains)-1] != "new-backend.example" {
+		t.Fatalf("reviewed learned domain did not reach runtime options: %#v", o.TargetDomains)
 	}
 }
 

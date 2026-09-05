@@ -27,6 +27,7 @@ type AgentTunnelOptions struct {
 	TargetDomainSuffix []string
 	StrictRoute        bool
 	DomainFallback     bool
+	upstreamHostRoutes []string
 }
 
 func DefaultAgentTunnelOptions() AgentTunnelOptions {
@@ -44,12 +45,17 @@ func DefaultAgentTunnelOptions() AgentTunnelOptions {
 		},
 		TargetDomainSuffix: []string{".googleapis.com"},
 		StrictRoute:        strictRoute,
-		DomainFallback:     true,
+		// Strict process isolation is the safe default. Domain fallback remains
+		// available as an explicit compatibility mode for helpers that cannot be
+		// attributed to an Antigravity process.
+		DomainFallback: false,
 	}
 }
 
-func (m *Manager) AgentTunnelSupported() bool { return runtime.GOOS == "windows" || runtime.GOOS == "linux" }
-func (m *Manager) AgentTunnelActive() bool    { return m.TunnelRunning() }
+func (m *Manager) AgentTunnelSupported() bool {
+	return runtime.GOOS == "windows" || runtime.GOOS == "linux"
+}
+func (m *Manager) AgentTunnelActive() bool { return m.TunnelRunning() || m.KernelHardStateActive() }
 
 func (m *Manager) AgentTunnelPrivilegeHint() string {
 	switch runtime.GOOS {
@@ -63,14 +69,14 @@ func (m *Manager) AgentTunnelPrivilegeHint() string {
 }
 
 func (m *Manager) StopAndWait(ctx context.Context) error {
-	hadTunnelState := m.Mode() == ModeAgentTunnel || m.NetworkJournalStatus().Open
+	hadTunnelState := m.Mode() == ModeAgentTunnel || m.NetworkJournalStatus().Open || m.KernelHardStateActive()
 	if err := m.Stop(); err != nil {
 		return err
 	}
 	ticker := time.NewTicker(40 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if !m.ManagedRunning() {
+		if !m.ManagedRunning() && !m.KernelHardProcessRunning() {
 			if hadTunnelState {
 				if err := m.finishTunnelTransaction(ctx); err != nil {
 					return fmt.Errorf("managed helper stopped but network-state recovery failed: %w", err)
@@ -85,6 +91,27 @@ func (m *Manager) StopAndWait(ctx context.Context) error {
 			m.mu.Unlock()
 			if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
+			}
+			// A killed sing-box may still need a short interval for Wait() to
+			// clear the manager state. Always finish the network transaction
+			// after that interval; returning immediately here used to leave a
+			// stale TUN/routing journal behind.
+			killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer killCancel()
+			for m.ManagedRunning() || m.KernelHardProcessRunning() {
+				select {
+				case <-killCtx.Done():
+					return fmt.Errorf("stop timeout after kill: %w", ctx.Err())
+				case <-time.After(40 * time.Millisecond):
+				}
+			}
+			if hadTunnelState {
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 12*time.Second)
+				cleanupErr := m.finishTunnelTransaction(cleanupCtx)
+				cleanupCancel()
+				if cleanupErr != nil {
+					return fmt.Errorf("stop timed out and network-state recovery failed: %w", cleanupErr)
+				}
 			}
 			return ctx.Err()
 		case <-ticker.C:
@@ -117,7 +144,7 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	secureDoH := map[string]any{
 		"type": "https", "tag": "secure-doh", "server": dnsIP, "server_port": 443, "path": "/dns-query",
 		"bind_interface": cfg.VPNInterface,
-		"tls": map[string]any{"enabled": true, "server_name": dnsName},
+		"tls":            map[string]any{"enabled": true, "server_name": dnsName},
 	}
 	localDNS := map[string]any{"type": "local", "tag": "local-dns", "prefer_go": false}
 	dnsRules := []any{
@@ -141,12 +168,13 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	tunInbound := map[string]any{
 		"type": "tun", "tag": agentTunnelTag, "interface_name": agentTunName,
 		"address": []string{"172.31.255.1/30", "fdfe:dcba:9876::1/126"},
-		"mtu": 1500, "auto_route": true, "strict_route": options.StrictRoute, "dns_mode": "hijack", "stack": "system",
+		"mtu":     1500, "auto_route": true, "strict_route": options.StrictRoute, "dns_mode": "hijack", "stack": "system",
 		"route_exclude_address": []string{
 			"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
 			"::1/128", "fe80::/10", "fc00::/7",
 		},
 	}
+	tunInbound["route_exclude_address"] = append(tunInbound["route_exclude_address"].([]string), options.upstreamHostRoutes...)
 	if runtime.GOOS == "linux" {
 		tunInbound["auto_redirect"] = false
 		tunInbound["iproute2_table_index"] = linuxTunnelRouteTableIndex
@@ -172,15 +200,15 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 			tunInbound,
 		},
 		"outbounds": []any{vpnDirect, systemDirect},
-		"route": map[string]any{"rules": routeRules, "final": "system-direct", "auto_detect_interface": true},
+		"route":     map[string]any{"rules": routeRules, "final": "system-direct", "auto_detect_interface": true},
 		"services": []any{
 			map[string]any{
 				"type": "api", "tag": "agp-observe",
 				"listen": singBoxAPIHost, "listen_port": singBoxAPIPort,
-				"secret": apiSecret,
-				"access_control_allow_origin": []string{"http://127.0.0.1", "http://localhost"},
+				"secret":                               apiSecret,
+				"access_control_allow_origin":          []string{"http://127.0.0.1", "http://localhost"},
 				"access_control_allow_private_network": false,
-				"dashboard": false,
+				"dashboard":                            false,
 			},
 		},
 	}
@@ -241,6 +269,10 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 	}
 	if iface.Flags&net.FlagUp == 0 {
 		return fmt.Errorf("selected VPN interface %q is down", vpn)
+	}
+	options.upstreamHostRoutes, err = tunnelUpstreamHostRoutes(ctx, vpn)
+	if err != nil {
+		return fmt.Errorf("inspect VPN transport bypass routes: %w", err)
 	}
 	if err := m.beginTunnelTransaction(ctx); err != nil {
 		return err

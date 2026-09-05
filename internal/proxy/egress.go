@@ -35,6 +35,12 @@ type PublicEgressAttestation struct {
 	SystemRelation       string                `json:"system_relation"`
 	VPNProviderSuccesses int                   `json:"vpn_provider_successes"`
 	VPNProviderFailures  int                   `json:"vpn_provider_failures"`
+	IPv4Observed         bool                  `json:"ipv4_observed"`
+	IPv6Observed         bool                  `json:"ipv6_observed"`
+	TCPObserved          bool                  `json:"tcp_observed"`
+	UDPObserved          bool                  `json:"udp_observed"`
+	QUICObserved         bool                  `json:"quic_observed"`
+	CoverageComplete     bool                  `json:"coverage_complete"`
 	Evidence             []EgressProbeEvidence `json:"evidence,omitempty"`
 	Detail               string                `json:"detail"`
 }
@@ -97,6 +103,14 @@ func (m *Manager) attestPublicEgressWithProviders(ctx context.Context, providers
 	for i, e := range vpnEvidence {
 		if e.OK {
 			r.VPNProviderSuccesses++
+			if e.Family == "ipv4" {
+				r.IPv4Observed = true
+			} else if e.Family == "ipv6" {
+				r.IPv6Observed = true
+			}
+			// The current observers are HTTPS/TCP only. Keep this explicit and
+			// fail closed until independent UDP and QUIC observers are wired.
+			r.TCPObserved = true
 			if !seen[e.ObservedIP] {
 				seen[e.ObservedIP] = true
 				r.VPNObservedIPs = append(r.VPNObservedIPs, e.ObservedIP)
@@ -109,6 +123,7 @@ func (m *Manager) attestPublicEgressWithProviders(ctx context.Context, providers
 			r.VPNProviderFailures++
 		}
 	}
+	r.CoverageComplete = r.IPv4Observed && r.IPv6Observed && r.TCPObserved && r.UDPObserved && r.QUICObserved
 	sort.Strings(r.VPNObservedIPs)
 	if len(r.VPNObservedIPs) == 0 {
 		r.Detail = fmt.Sprintf("external vpn-direct egress could not be observed through %d provider(s)", len(providers))

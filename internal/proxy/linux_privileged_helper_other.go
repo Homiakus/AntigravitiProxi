@@ -7,3 +7,7 @@ import "fmt"
 func RunLinuxPrivilegedSetup(binary, expectedSHA256 string) error {
 	return fmt.Errorf("Linux privileged setup helper is unavailable on this platform")
 }
+
+func RunLinuxPrivilegedRecovery(journalPath string) error {
+	return fmt.Errorf("Linux privileged recovery helper is unavailable on this platform")
+}

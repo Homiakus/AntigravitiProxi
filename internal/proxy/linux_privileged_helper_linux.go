@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,98 @@ import (
 	"syscall"
 	"time"
 )
+
+// RunLinuxPrivilegedRecovery is the fixed-function recovery entry point used
+// only after the ordinary-user control plane receives EPERM while removing
+// stale Agent Tunnel state. It does not accept commands or arbitrary network
+// arguments; it reads and validates the user's journal and removes only the
+// reserved interface/table/rule namespace recorded there.
+func RunLinuxPrivilegedRecovery(journalPath string) error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("privileged Linux recovery helper must run as root")
+	}
+	journalPath = filepath.Clean(strings.TrimSpace(journalPath))
+	if err := validatePrivilegedJournalTarget(journalPath); err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(journalPath)
+	if err != nil {
+		return fmt.Errorf("read Agent Tunnel journal: %w", err)
+	}
+	j, err := decodeTunnelJournal(raw)
+	if err != nil {
+		return fmt.Errorf("validate Agent Tunnel journal: %w", err)
+	}
+	if j.Phase != "recovering" {
+		return fmt.Errorf("refusing privileged recovery for journal phase %q", j.Phase)
+	}
+	if j.PID > 0 && platformProcessAlive(j.PID) {
+		return fmt.Errorf("refusing privileged recovery while managed PID %d is alive", j.PID)
+	}
+	if err := validateReservedTunnelOwnership(j.Owned); err != nil {
+		return err
+	}
+	if _, err := recoverPlatformOwnedNetworkState(context.Background(), *j); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validatePrivilegedJournalTarget(path string) error {
+	if !filepath.IsAbs(path) || filepath.Base(path) != "network-state.json" || filepath.Base(filepath.Dir(path)) != "AntigravitiProxi" {
+		return fmt.Errorf("refusing unexpected Agent Tunnel journal path %q", path)
+	}
+	lst, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("lstat Agent Tunnel journal: %w", err)
+	}
+	if lst.Mode()&os.ModeSymlink != 0 || !lst.Mode().IsRegular() {
+		return fmt.Errorf("refusing symlink or non-regular Agent Tunnel journal")
+	}
+	uid, haveInvoker, err := invokingDesktopUID()
+	if err != nil {
+		return err
+	}
+	if haveInvoker {
+		stat, ok := lst.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != uid {
+			return fmt.Errorf("refusing journal not owned by invoking desktop user")
+		}
+	}
+	return nil
+}
+
+func validateReservedTunnelOwnership(owned OwnedNetworkDelta) error {
+	want := reservedPlatformOwnership()
+	if owned.TunnelInterface != want.TunnelInterface || !sameStrings(owned.NewRouteTablesV4, want.NewRouteTablesV4) || !sameStrings(owned.NewRouteTablesV6, want.NewRouteTablesV6) || !sameInts(owned.NewRulePrioritiesV4, want.NewRulePrioritiesV4) || !sameInts(owned.NewRulePrioritiesV6, want.NewRulePrioritiesV6) {
+		return fmt.Errorf("refusing privileged recovery: journal ownership is outside the reserved Agent Tunnel namespace")
+	}
+	return nil
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameInts(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 // RunLinuxPrivilegedSetup is the narrow internal entry point executed through
 // pkexec/sudo. It accepts no arbitrary command. The caller must provide the

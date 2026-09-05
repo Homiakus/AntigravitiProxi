@@ -178,7 +178,7 @@ func analyzeHostRouteConflicts(cfg Config, snapshot NetworkSnapshot) []Preflight
 
 func likelyVPNName(name string) bool {
 	name = strings.ToLower(name)
-	return strings.Contains(name, "amnezia") || strings.Contains(name, "vpn") || strings.Contains(name, "wireguard") || strings.HasPrefix(name, "wg") || strings.HasPrefix(name, "tun") || strings.Contains(name, "wintun") || strings.Contains(name, "tailscale") || strings.Contains(name, "outline")
+	return strings.Contains(name, "amnezia") || strings.HasPrefix(name, "amn") || strings.Contains(name, "vpn") || strings.Contains(name, "wireguard") || strings.HasPrefix(name, "wg") || strings.HasPrefix(name, "tun") || strings.Contains(name, "wintun") || strings.Contains(name, "tailscale") || strings.Contains(name, "outline")
 }
 
 func virtualNetworkManager(name string) string {

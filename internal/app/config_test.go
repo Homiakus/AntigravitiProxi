@@ -24,6 +24,12 @@ func TestValidateSettingsSecurityRejectsRemoteListeners(t *testing.T) {
 	}
 }
 
+func TestDefaultSettingsKeepAgentTunnelProcessScoped(t *testing.T) {
+	if got := defaultSettings().TunnelDomainFallback; got {
+		t.Fatal("domain fallback must be disabled by default")
+	}
+}
+
 func TestValidateSettingsSecurityAcceptsLoopback(t *testing.T) {
 	for _, addr := range []string{"127.0.0.1:48765", "localhost:48765", "[::1]:48765"} {
 		s := defaultSettings()

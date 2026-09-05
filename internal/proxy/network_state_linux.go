@@ -145,6 +145,23 @@ func recoverPlatformOwnedNetworkState(ctx context.Context, j TunnelStateJournal)
 }
 
 func deleteRulePriority(ctx context.Context, family string, priority int) error {
+	// A clean shutdown needs no elevated mutation. In particular, ip rule del
+	// may return EPERM for an absent rule when the manager is an ordinary user.
+	lines, err := commandLines(ctx, "ip", "-o", family, "rule", "show")
+	if err != nil {
+		return err
+	}
+	present := false
+	for _, line := range lines {
+		if p, ok := rulePriority(line); ok && p == priority {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return nil
+	}
+
 	// A priority can theoretically contain multiple rules. The entire configured
 	// range was proven empty before this operation, so any rule that later
 	// appears inside it belongs to this Agent Tunnel transaction.
@@ -162,6 +179,21 @@ func deleteRulePriority(ctx context.Context, family string, priority int) error 
 }
 
 func flushRouteTable(ctx context.Context, family, table string) error {
+	lines, inspectErr := commandLines(ctx, "ip", "-o", family, "route", "show", "table", "all")
+	if inspectErr != nil {
+		return inspectErr
+	}
+	present := false
+	for _, line := range lines {
+		if routeTable(line) == table {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return nil
+	}
+
 	out, err := exec.CommandContext(ctx, "ip", family, "route", "flush", "table", table).CombinedOutput()
 	if err == nil {
 		return nil
@@ -179,4 +211,34 @@ func platformProcessAlive(pid int) bool {
 	}
 	_, err := os.Stat("/proc/" + strconv.Itoa(pid))
 	return err == nil || !errors.Is(err, os.ErrNotExist)
+}
+
+// tryPrivilegedNetworkRecovery is only a fallback for the narrow case where
+// the ordinary-user control plane cannot remove state created by the
+// capability-bearing sing-box. The privileged entry point validates the
+// journal again and can touch only the reserved Agent Tunnel namespace.
+func (m *Manager) tryPrivilegedNetworkRecovery(ctx context.Context, cause error) ([]string, error) {
+	if !networkMutationPermissionError(cause.Error()) {
+		return nil, cause
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve control-plane executable for privileged recovery: %w", err)
+	}
+	if err := runLinuxPrivilegeBroker(self, "__linux-privileged-recover", m.networkJournalPath()); err != nil {
+		return nil, err
+	}
+	return []string{"privileged helper removed reserved Agent Tunnel network state"}, nil
+}
+
+func networkMutationPermissionError(detail string) bool {
+	detail = strings.ToLower(detail)
+	return strings.Contains(detail, "operation not permitted") ||
+		strings.Contains(detail, "permission denied") ||
+		strings.Contains(detail, "eperm")
 }

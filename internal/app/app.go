@@ -55,6 +55,8 @@ type Status struct {
 	AgentTunnelActive    bool                 `json:"agent_tunnel_active"`
 	AgentTunnelSupported bool                 `json:"agent_tunnel_supported"`
 	AgentTunnelHint      string               `json:"agent_tunnel_hint,omitempty"`
+	TunnelEnforcement    string               `json:"tunnel_enforcement"`
+	KernelIsolation      map[string]any       `json:"kernel_isolation"`
 	Health               proxy.HealthSnapshot `json:"health"`
 	Settings             Settings             `json:"settings"`
 	Interfaces           []platform.Interface `json:"interfaces"`
@@ -67,6 +69,9 @@ func New() (*Server, error) {
 	}
 	if err = os.MkdirAll(root, 0o755); err != nil {
 		return nil, err
+	}
+	if _, err := antigravity.ExpireHostsOverride(filepath.Join(root, "backups"), time.Now().UTC()); err != nil {
+		return nil, fmt.Errorf("validate emergency hosts override: %w", err)
 	}
 
 	settingsPath := filepath.Join(root, "config.json")
@@ -213,6 +218,21 @@ func decodeJSON(r *http.Request, v any) error {
 func (s *Server) status(ctx context.Context) Status {
 	ifaces, _ := platform.Interfaces()
 	health := s.pm.Health()
+	enforcement := "userspace-soft"
+	kernel := map[string]any{"supported": runtime.GOOS == "linux", "active": false}
+	if runtime.GOOS == "linux" {
+		if st, err := s.pm.KernelHardState(); err == nil {
+			enforcement = "kernel-hard"
+			kernel["active"] = true
+			kernel["namespace"] = st.Namespace
+			kernel["host_veth"] = st.HostVeth
+			kernel["vpn_interface"] = st.VPN
+			kernel["cgroup"] = st.Cgroup
+			kernel["evidence_path"] = filepath.Join(s.Root(), "kernel-hard-last-evidence.txt")
+		} else if err := s.pm.KernelHardAvailable(); err != nil {
+			kernel["error"] = err.Error()
+		}
+	}
 	return Status{
 		OS:                   runtime.GOOS,
 		Arch:                 runtime.GOARCH,
@@ -225,6 +245,8 @@ func (s *Server) status(ctx context.Context) Status {
 		AgentTunnelActive:    s.pm.AgentTunnelActive(),
 		AgentTunnelSupported: s.pm.AgentTunnelSupported(),
 		AgentTunnelHint:      s.pm.AgentTunnelPrivilegeHint(),
+		TunnelEnforcement:    enforcement,
+		KernelIsolation:      kernel,
 		Health:               health,
 		Settings:             s.Settings(),
 		Interfaces:           ifaces,
@@ -298,15 +320,16 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 type settingsPatch struct {
-	Listen               *string `json:"listen"`
-	ProxyHost            *string `json:"proxy_host"`
-	ProxyPort            *int    `json:"proxy_port"`
-	VPNInterface         *string `json:"vpn_interface"`
-	DNSProvider          *string `json:"dns_provider"`
-	SingBoxVer           *string `json:"sing_box_version"`
-	AutoOpen             *bool   `json:"auto_open"`
-	TunnelStrictRoute    *bool   `json:"tunnel_strict_route"`
-	TunnelDomainFallback *bool   `json:"tunnel_domain_fallback"`
+	Listen               *string   `json:"listen"`
+	ProxyHost            *string   `json:"proxy_host"`
+	ProxyPort            *int      `json:"proxy_port"`
+	VPNInterface         *string   `json:"vpn_interface"`
+	DNSProvider          *string   `json:"dns_provider"`
+	SingBoxVer           *string   `json:"sing_box_version"`
+	AutoOpen             *bool     `json:"auto_open"`
+	TunnelStrictRoute    *bool     `json:"tunnel_strict_route"`
+	TunnelDomainFallback *bool     `json:"tunnel_domain_fallback"`
+	TunnelLearnedDomains *[]string `json:"tunnel_learned_domains,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +367,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.TunnelDomainFallback != nil {
 		cur.TunnelDomainFallback = *in.TunnelDomainFallback
+	}
+	if in.TunnelLearnedDomains != nil {
+		cur.TunnelLearnedDomains = append([]string(nil), (*in.TunnelLearnedDomains)...)
 	}
 	if runtime.GOOS == "linux" {
 		cur.TunnelStrictRoute = true
@@ -437,8 +463,18 @@ func (s *Server) startSafeProxy(ctx context.Context) error {
 		if !s.pm.ManagedRunning() {
 			return fmt.Errorf("sing-box exited before safe proxy readiness")
 		}
-		if owned, _ := s.pm.ManagedListenerOwned(); owned {
-			s.events.publish("info", "SAFE proxy readiness proven by managed listener ownership")
+		if s.pm.Running() {
+			if owned, detail := s.pm.ManagedListenerOwned(); owned {
+				s.events.publish("info", "SAFE proxy readiness proven by managed listener ownership")
+			} else {
+				// A plain local proxy is useful to periodically-launched clients even
+				// when Linux /proc socket attribution is unavailable or races with
+				// sing-box startup. The managed process must still be alive and the
+				// configured port must accept connections; Agent Tunnel keeps the
+				// stronger ownership requirement below its own startup path.
+				s.events.publish("warn", "SAFE proxy is reachable; listener ownership proof unavailable: "+detail)
+				s.pm.MarkProxyReadinessFallback()
+			}
 			return nil
 		}
 		select {
@@ -575,6 +611,7 @@ func (s *Server) tunnelOptions() proxy.AgentTunnelOptions {
 	o := proxy.DefaultAgentTunnelOptions()
 	settings := s.Settings()
 	o.DomainFallback = settings.TunnelDomainFallback
+	o.TargetDomains = append(o.TargetDomains, settings.TunnelLearnedDomains...)
 	if runtime.GOOS != "linux" {
 		o.StrictRoute = settings.TunnelStrictRoute
 	}
@@ -585,42 +622,17 @@ func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
 
-	if !s.pm.AgentTunnelSupported() {
-		http.Error(w, s.pm.AgentTunnelPrivilegeHint(), http.StatusNotImplemented)
+	// Compatibility alias: the normal workflow is a persistent local proxy.
+	// Older UI/Cockpit clients must not enter the experimental TUN path.
+	if err := s.startSafeProxy(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if strings.TrimSpace(s.Settings().VPNInterface) == "" {
-		http.Error(w, "Agent Tunnel requires selecting and saving a VPN interface first", http.StatusBadRequest)
-		return
-	}
-	if err := s.pm.StopAndWait(ctx); err != nil {
-		http.Error(w, "stop existing proxy before Agent Tunnel: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.invalidateEgressEvidence("Agent Tunnel start boundary")
-	if err := s.pm.StartAgentTunnel(ctx, s.tunnelOptions()); err != nil {
-		s.events.publish("error", "Agent Tunnel start failed: "+err.Error())
-		http.Error(w, err.Error()+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
-		return
-	}
-	health := s.pm.Health()
-	if health.State != proxy.HealthHealthy {
-		_ = s.rollbackProxyStart()
-		http.Error(w, "Agent Tunnel returned from startup without healthy evidence", http.StatusInternalServerError)
-		return
-	}
-
-	s.events.publish("warn", "AGENT TUNNEL active: verified TUN/listener/VPN evidence is healthy")
 	writeJSON(w, map[string]any{
-		"ok":               true,
-		"mode":             "agent-tunnel",
-		"active":           s.pm.AgentTunnelActive(),
-		"vpn_interface":    s.Settings().VPNInterface,
-		"privilege_hint":   s.pm.AgentTunnelPrivilegeHint(),
-		"local_proxy":      s.pm.HTTPProxyURL(),
-		"system_proxy_set": false,
-		"health":           health,
+		"ok": true, "mode": "safe-proxy", "active": false,
+		"local_proxy": s.pm.HTTPProxyURL(), "health": s.pm.Health(),
 	})
+	return
 }
 
 func (s *Server) handleTunnelStop(w http.ResponseWriter, r *http.Request) {
@@ -639,51 +651,26 @@ func (s *Server) handleTunnelLaunch(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Minute)
 	defer cancel()
 
-	if s.pm.Mode() != proxy.ModeAgentTunnel || s.pm.Health().State != proxy.HealthHealthy {
-		if !s.pm.AgentTunnelSupported() {
-			http.Error(w, s.pm.AgentTunnelPrivilegeHint(), http.StatusNotImplemented)
-			return
-		}
-		if strings.TrimSpace(s.Settings().VPNInterface) == "" {
-			http.Error(w, "select and save a VPN interface before Agent Tunnel", http.StatusBadRequest)
-			return
-		}
-		if err := s.pm.StopAndWait(ctx); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		s.invalidateEgressEvidence("Agent Tunnel launch restart boundary")
-		if err := s.pm.StartAgentTunnel(ctx, s.tunnelOptions()); err != nil {
-			http.Error(w, err.Error()+"\n"+s.pm.AgentTunnelPrivilegeHint(), http.StatusInternalServerError)
-			return
-		}
+	// Compatibility alias for the old “Tunnel launch” action. Launch Antigravity
+	// with the persistent process-scoped proxy and do not create a TUN device.
+	if err := s.startSafeProxy(ctx); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-
-	files, err := antigravity.ForceProductionEndpoint()
-	if err != nil {
-		s.events.publish("warn", "endpoint override: "+err.Error())
+	legacyFiles, legacyErr := antigravity.ForceProductionEndpoint()
+	if legacyErr != nil {
+		s.events.publish("warn", "endpoint override: "+legacyErr.Error())
 	}
 	if err := antigravity.LaunchWithProxy("", s.pm.HTTPProxyURL(), "socks5://"+s.pm.SOCKSProxyAddr()); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	processTree := antigravity.DiscoverAgentProcessTree()
-	level := "info"
-	message := "Antigravity launched in AGENT TUNNEL mode"
-	if len(processTree.UnknownHelpers) > 0 {
-		level = "warn"
-		message = fmt.Sprintf("Antigravity launched, but %d unknown process-tree descendant(s) require egress attestation", len(processTree.UnknownHelpers))
-	}
-	s.events.publish(level, message)
+	s.events.publish("info", "Antigravity launched with persistent local proxy")
 	writeJSON(w, map[string]any{
-		"ok":              true,
-		"mode":            "agent-tunnel",
-		"settings_files":  files,
-		"tunnel_active":   s.pm.AgentTunnelActive(),
-		"health":          s.pm.Health(),
-		"agent_processes": processTree,
+		"ok": true, "mode": "safe-proxy", "settings_files": legacyFiles,
+		"tunnel_active": false, "health": s.pm.Health(),
 	})
+	return
 }
 
 func (s *Server) Serve(ctx context.Context) error {

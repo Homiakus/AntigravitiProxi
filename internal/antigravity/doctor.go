@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/Homiakus/AntigravitiProxi/internal/diagnostics"
 )
 
 type AgentFinding struct {
@@ -66,8 +68,6 @@ var doctorPatterns = []doctorPattern{
 var (
 	trajectoryRE = regexp.MustCompile(`(?i)trajectory(?:\s+id|id)?\s*[:=]\s*([0-9a-f]{8}-[0-9a-f-]{20,})`)
 	traceRE      = regexp.MustCompile(`(?i)trace(?:\s+id|id)?\s*[:=]\s*(0x[0-9a-f]+|[0-9a-f]{16,}|[0-9a-f]{8}-[0-9a-f-]{20,})`)
-	bearerRE     = regexp.MustCompile(`(?i)bearer\s+[a-z0-9._~+/=-]{16,}`)
-	tokenJSONRE  = regexp.MustCompile(`(?i)("?(?:access_token|refresh_token|id_token|authorization)"?\s*[:=]\s*"?)[^"\s,}]{12,}`)
 )
 
 func AgentDoctor(ctx context.Context) AgentDoctorReport {
@@ -249,8 +249,7 @@ func safeSnippet(text string, idx, n int) string {
 		end = len(text)
 	}
 	s := text[start:end]
-	s = bearerRE.ReplaceAllString(s, "Bearer <redacted>")
-	s = tokenJSONRE.ReplaceAllString(s, `${1}<redacted>`)
+	s = diagnostics.Redact(s)
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) > 700 {
 		s = s[:700] + "…"
