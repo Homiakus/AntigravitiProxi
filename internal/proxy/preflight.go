@@ -81,6 +81,17 @@ func (m *Manager) AgentTunnelPreflight(ctx context.Context) AgentTunnelPreflight
 		add(PreflightBlocker, "tun.preexisting", agentTunName+" already exists before this operation; ownership is unknown")
 	}
 
+	// The sing-box 1.14 observation API is intentionally bound to loopback and
+	// authenticated. A pre-existing listener on the reserved port is still a
+	// hard identity ambiguity, so do not start a privileged data plane around it.
+	apiAddr := m.APIAddr()
+	if conn, err := net.DialTimeout("tcp", apiAddr, 180*time.Millisecond); err == nil {
+		_ = conn.Close()
+		add(PreflightBlocker, "api.listener_occupied", "reserved authenticated sing-box API listener "+apiAddr+" is already occupied")
+	} else {
+		add(PreflightInfo, "api.listener_free", "authenticated sing-box API listener "+apiAddr+" is available")
+	}
+
 	snapshot, err := capturePlatformNetworkSnapshot(ctx)
 	if err != nil {
 		add(PreflightBlocker, "snapshot.failed", err.Error())
@@ -129,10 +140,6 @@ func analyzeHostRouteConflicts(cfg Config, snapshot NetworkSnapshot) []Preflight
 		out = append(out, PreflightFinding{Severity: PreflightWarning, Code: code, Detail: detail})
 	}
 
-	// Non-standard policy rules are not automatically conflicts. They are
-	// surfaced because they are exactly the kind of host-specific state that can
-	// reorder route lookup around a TUN. The reserved Agent Tunnel range itself
-	// was already checked as a hard blocker above.
 	for _, family := range []struct {
 		name  string
 		rules []string
