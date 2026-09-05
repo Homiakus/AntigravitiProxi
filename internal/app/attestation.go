@@ -12,23 +12,32 @@ import (
 
 type AssuranceState string
 
+type IsolationState string
+
 const (
 	AssuranceIdle     AssuranceState = "idle"
 	AssurancePartial  AssuranceState = "partial"
 	AssuranceVerified AssuranceState = "verified"
 	AssuranceDegraded AssuranceState = "degraded"
+
+	IsolationInactive IsolationState = "inactive"
+	IsolationStrict   IsolationState = "strict"
+	IsolationRelaxed  IsolationState = "isolation-relaxed"
 )
 
 type NetworkAttestationReport struct {
-	State            AssuranceState                `json:"state"`
-	ObservedAt       time.Time                     `json:"observed_at"`
-	ProcessTree      antigravity.ProcessTreeReport `json:"process_tree"`
-	Route            proxy.RouteAttestation        `json:"route"`
-	PIDRoute         proxy.PIDRouteAttestation     `json:"pid_route"`
-	Egress           proxy.PublicEgressAttestation `json:"egress"`
-	EgressCached     bool                          `json:"egress_cached"`
-	EgressFreshUntil *time.Time                    `json:"egress_fresh_until,omitempty"`
-	Detail           string                        `json:"detail"`
+	State                 AssuranceState                `json:"state"`
+	Isolation             IsolationState                `json:"isolation"`
+	IsolationDetail       string                        `json:"isolation_detail"`
+	DomainFallbackEnabled bool                          `json:"domain_fallback_enabled"`
+	ObservedAt            time.Time                     `json:"observed_at"`
+	ProcessTree           antigravity.ProcessTreeReport `json:"process_tree"`
+	Route                 proxy.RouteAttestation        `json:"route"`
+	PIDRoute              proxy.PIDRouteAttestation     `json:"pid_route"`
+	Egress                proxy.PublicEgressAttestation `json:"egress"`
+	EgressCached          bool                          `json:"egress_cached"`
+	EgressFreshUntil      *time.Time                    `json:"egress_fresh_until,omitempty"`
+	Detail                string                        `json:"detail"`
 }
 
 // networkAttestation composes independent evidence instead of treating one
@@ -41,9 +50,14 @@ func (s *Server) networkAttestation(ctx context.Context) NetworkAttestationRepor
 	r := NetworkAttestationReport{ObservedAt: time.Now().UTC()}
 	tunnelActive := s.pm.Mode() == proxy.ModeAgentTunnel && s.pm.AgentTunnelActive()
 	if !tunnelActive {
+		r.Isolation, r.IsolationDetail = classifyIsolationPolicy(false, false)
 		r.State, r.Detail = classifyNetworkAttestation(false, r)
 		return r
 	}
+
+	settings := s.Settings()
+	r.DomainFallbackEnabled = settings.TunnelDomainFallback
+	r.Isolation, r.IsolationDetail = classifyIsolationPolicy(true, settings.TunnelDomainFallback)
 
 	r.ProcessTree = antigravity.DiscoverAgentProcessTree()
 	pids := make([]int, 0, len(r.ProcessTree.Processes))
@@ -65,7 +79,25 @@ func (s *Server) networkAttestation(ctx context.Context) NetworkAttestationRepor
 		r.Egress.Detail = "external egress not probed because no attributable live Antigravity connection is active"
 	}
 	r.State, r.Detail = classifyNetworkAttestation(true, r)
+	if r.State == AssuranceVerified && r.Isolation == IsolationRelaxed {
+		r.Detail += "; Antigravity egress is verified, but domain fallback relaxes unrelated-process isolation for target Google domains"
+	}
 	return r
+}
+
+// classifyIsolationPolicy is deliberately separate from route assurance.
+// A known Antigravity PID can have a fully proven vpn-direct path while broad
+// domain fallback simultaneously weakens isolation for unrelated applications.
+// Conflating those dimensions would either hide policy relaxation or make
+// transport evidence impossible to interpret.
+func classifyIsolationPolicy(tunnelActive, domainFallback bool) (IsolationState, string) {
+	if !tunnelActive {
+		return IsolationInactive, "Agent Tunnel is inactive; no TUN process-isolation policy is applied"
+	}
+	if domainFallback {
+		return IsolationRelaxed, "domain fallback is enabled: target Google domains may use vpn-direct even when process identity is not attributed"
+	}
+	return IsolationStrict, "domain fallback is disabled: vpn-direct selection is restricted to explicit process/path policy and local-mixed traffic"
 }
 
 // classifyNetworkAttestation is deliberately pure: policy decisions can be
