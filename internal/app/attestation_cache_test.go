@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -50,5 +51,28 @@ func TestEgressEvidenceCacheClearInvalidatesEvidence(t *testing.T) {
 	c.clear()
 	if _, _, ok := c.lookup("pid=10|vpn=vpn0", base.Add(time.Second)); ok {
 		t.Fatal("clear must invalidate cached egress evidence")
+	}
+}
+
+func TestServerInvalidateEgressEvidenceClearsAndPublishes(t *testing.T) {
+	hub := newEventHub()
+	s := &Server{events: hub}
+	base := time.Now().UTC()
+	s.egressCache.store("pid=10|vpn=vpn0", proxy.PublicEgressAttestation{Available: true}, base)
+
+	ch, cancel := hub.subscribe()
+	defer cancel()
+	s.invalidateEgressEvidence("test lifecycle boundary")
+
+	if _, _, ok := s.egressCache.lookup("pid=10|vpn=vpn0", base.Add(time.Second)); ok {
+		t.Fatal("server lifecycle invalidation must clear cached evidence")
+	}
+	select {
+	case e := <-ch:
+		if e.Level != "info" || !strings.Contains(e.Message, "test lifecycle boundary") {
+			t.Fatalf("unexpected invalidation event: %#v", e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected lifecycle invalidation event")
 	}
 }
