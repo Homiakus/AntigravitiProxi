@@ -3,6 +3,7 @@ package proxy
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -47,7 +48,13 @@ func TestEnsureAPISecretPersistsAndReusesStrongSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm()&0o077 != 0 {
+	// Windows does not report NTFS ACLs through FileMode permission bits; a
+	// freshly created private file commonly appears as 0666 even when access is
+	// constrained by the directory DACL. POSIX mode is therefore valid evidence
+	// only on Unix-like systems. Windows ACL hardening is tracked separately and
+	// must be verified with native security-descriptor evidence rather than this
+	// lossy compatibility field.
+	if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
 		t.Fatalf("API secret is too permissive: %o", st.Mode().Perm())
 	}
 }
