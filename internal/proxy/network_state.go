@@ -58,6 +58,11 @@ type TunnelStateJournal struct {
 	Owned         OwnedNetworkDelta `json:"owned"`
 	LastError     string            `json:"last_error,omitempty"`
 	Recovery      []string          `json:"recovery,omitempty"`
+
+	// RecoveredFromPreviousGood is runtime-only evidence. It prevents a corrupt
+	// primary journal from overwriting the validated backup on the first repair
+	// write and is intentionally never persisted.
+	RecoveredFromPreviousGood bool `json:"-"`
 }
 
 type NetworkJournalStatus struct {
@@ -72,26 +77,74 @@ func (m *Manager) networkJournalPath() string {
 	return filepath.Join(m.Config().Root, "network-state.json")
 }
 
+func (m *Manager) networkJournalPreviousGoodPath() string {
+	return m.networkJournalPath() + ".previous-good"
+}
+
 func (m *Manager) lastCleanNetworkJournalPath() string {
 	return filepath.Join(m.Config().Root, "network-state-last-clean.json")
 }
 
+func decodeTunnelJournal(b []byte) (*TunnelStateJournal, error) {
+	var j TunnelStateJournal
+	if err := json.Unmarshal(b, &j); err != nil {
+		return nil, fmt.Errorf("decode JSON: %w", err)
+	}
+	if j.SchemaVersion != networkStateSchema {
+		return nil, fmt.Errorf("unsupported schema %d", j.SchemaVersion)
+	}
+	if strings.TrimSpace(j.OperationID) == "" {
+		return nil, errors.New("missing operation_id")
+	}
+	switch j.Phase {
+	case "prepared", "active", "recovering", "clean", "aborted-before-network-apply":
+	default:
+		return nil, fmt.Errorf("unsupported phase %q", j.Phase)
+	}
+	return &j, nil
+}
+
 func (m *Manager) loadTunnelJournal() (*TunnelStateJournal, error) {
-	b, err := os.ReadFile(m.networkJournalPath())
+	path := m.networkJournalPath()
+	b, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var j TunnelStateJournal
-	if err := json.Unmarshal(b, &j); err != nil {
-		return nil, fmt.Errorf("decode network-state journal: %w", err)
+	j, primaryErr := decodeTunnelJournal(b)
+	if primaryErr == nil {
+		return j, nil
 	}
-	if j.SchemaVersion != networkStateSchema {
-		return nil, fmt.Errorf("unsupported network-state schema %d", j.SchemaVersion)
+
+	// Atomic writes keep the immediately preceding complete value. It is safe
+	// to use only if it validates structurally and is not the already-finalized
+	// operation recorded as last-clean. beginTunnelTransaction also removes any
+	// previous operation's leftover backup before writing a new prepared state.
+	backupRaw, backupReadErr := os.ReadFile(m.networkJournalPreviousGoodPath())
+	if backupReadErr != nil {
+		return nil, fmt.Errorf("network-state journal invalid: %v; previous-good unavailable: %w", primaryErr, backupReadErr)
 	}
-	return &j, nil
+	backup, backupErr := decodeTunnelJournal(backupRaw)
+	if backupErr != nil {
+		return nil, fmt.Errorf("network-state journal invalid: %v; previous-good invalid: %v", primaryErr, backupErr)
+	}
+	if cleanRaw, cleanErr := os.ReadFile(m.lastCleanNetworkJournalPath()); cleanErr == nil {
+		if clean, decodeErr := decodeTunnelJournal(cleanRaw); decodeErr == nil && clean.OperationID == backup.OperationID {
+			return nil, fmt.Errorf("network-state journal invalid: %v; previous-good belongs to already-clean operation %s", primaryErr, backup.OperationID)
+		}
+	}
+	backup.RecoveredFromPreviousGood = true
+	backup.LastError = appendJournalError(backup.LastError, "primary network-state journal invalid; recovered previous-good: "+primaryErr.Error())
+	return backup, nil
+}
+
+func appendJournalError(existing, next string) string {
+	if strings.TrimSpace(existing) == "" {
+		return next
+	}
+	return existing + "; " + next
 }
 
 func (m *Manager) writeTunnelJournal(j *TunnelStateJournal) error {
@@ -117,6 +170,14 @@ func (m *Manager) beginTunnelTransaction(ctx context.Context) error {
 	if err := preflightPlatformNetworkOwnership(before); err != nil {
 		return fmt.Errorf("network ownership preflight: %w", err)
 	}
+
+	// A previous operation's backup must never become a candidate for this new
+	// operation. The new primary prepared journal is atomic, so there is no need
+	// for an older-operation previous-good before the first state transition.
+	if err := os.Remove(m.networkJournalPreviousGoodPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove stale previous-good journal: %w", err)
+	}
+
 	now := time.Now().UTC()
 	j := &TunnelStateJournal{
 		SchemaVersion: networkStateSchema,
@@ -163,6 +224,7 @@ func (m *Manager) abortPreparedTunnelTransaction(reason string) {
 
 func (m *Manager) persistCleanJournal(j *TunnelStateJournal) error {
 	j.UpdatedAt = time.Now().UTC()
+	j.RecoveredFromPreviousGood = false
 	b, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
 		return err
@@ -173,6 +235,23 @@ func (m *Manager) persistCleanJournal(j *TunnelStateJournal) error {
 	if err := os.Remove(m.networkJournalPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	if err := os.Remove(m.networkJournalPreviousGoodPath()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) quarantineInvalidPrimary(j *TunnelStateJournal) error {
+	if !j.RecoveredFromPreviousGood {
+		return nil
+	}
+	path := m.networkJournalPath()
+	quarantine := fmt.Sprintf("%s.corrupt-%s", path, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if err := os.Rename(path, quarantine); err != nil {
+		return fmt.Errorf("quarantine invalid primary journal: %w", err)
+	}
+	j.Recovery = append(j.Recovery, "quarantined invalid primary journal as "+filepath.Base(quarantine))
+	j.RecoveredFromPreviousGood = false
 	return nil
 }
 
@@ -181,7 +260,9 @@ func (m *Manager) persistCleanJournal(j *TunnelStateJournal) error {
 // the journal therefore already knows what may be cleaned even if the process
 // dies before active evidence is persisted. Observed before/after differences
 // are merged only as additional evidence. Unknown TUNs or live previous helper
-// PIDs always fail closed.
+// PIDs always fail closed. If the primary journal is corrupt, a validated
+// previous-good from the same non-clean operation is quarantined/replayed before
+// any network mutation.
 func (m *Manager) RecoverStaleNetworkState(ctx context.Context) error {
 	j, err := m.loadTunnelJournal()
 	if err != nil {
@@ -204,6 +285,9 @@ func (m *Manager) RecoverStaleNetworkState(ctx context.Context) error {
 	if j.Active == nil {
 		j.Owned = mergeOwnedNetworkDelta(j.Owned, deriveOwnedNetworkDelta(j.Before, current))
 		j.Owned.TunnelInterface = agentTunName
+	}
+	if err := m.quarantineInvalidPrimary(j); err != nil {
+		return err
 	}
 	j.Phase = "recovering"
 	if err := m.writeTunnelJournal(j); err != nil {
@@ -256,12 +340,16 @@ func (m *Manager) NetworkJournalStatus() NetworkJournalStatus {
 	if j == nil {
 		return NetworkJournalStatus{Detail: "no open network transaction"}
 	}
+	detail := "network-state transaction requires completion or recovery"
+	if j.RecoveredFromPreviousGood {
+		detail = "primary journal is invalid; validated previous-good is available for recovery"
+	}
 	return NetworkJournalStatus{
 		Open:        true,
 		Phase:       j.Phase,
 		OperationID: j.OperationID,
 		UpdatedAt:   j.UpdatedAt,
-		Detail:      "network-state transaction requires completion or recovery",
+		Detail:      detail,
 	}
 }
 
