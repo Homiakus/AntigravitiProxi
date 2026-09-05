@@ -19,8 +19,8 @@ import (
 // TestLinuxAgentTunnelRuntimeSmoke is opt-in and is executed by CI inside an
 // isolated Linux network namespace. Unlike the schema test, this starts the
 // real pinned sing-box, creates the TUN, installs routes state, proves
-// process/path-aware dual egress, then performs a graceful shutdown and
-// verifies TUN cleanup.
+// process/path-aware dual egress, proves the durable network journal reaches
+// active, then performs a graceful shutdown and verifies TUN + journal cleanup.
 func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 	if os.Getenv("AGP_LINUX_TUN_SMOKE") != "1" {
 		t.Skip("set AGP_LINUX_TUN_SMOKE=1 to run privileged Linux TUN smoke test")
@@ -67,7 +67,7 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		_, tunErr := net.InterfaceByName("antigravity-tun")
+		_, tunErr := net.InterfaceByName(agentTunName)
 		owned, _ := m.ManagedListenerOwned()
 		if tunErr == nil && owned && m.TunnelRunning() {
 			break
@@ -79,6 +79,20 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 			t.Fatalf("TUN/owned-listener health timeout:\n%s", tunnelDebug(m))
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	j, err := m.loadTunnelJournal()
+	if err != nil {
+		t.Fatalf("load active network journal: %v", err)
+	}
+	if j == nil || j.Phase != "active" || j.PID != m.ManagedPID() || j.Active == nil {
+		t.Fatalf("durable network journal did not reach active with managed PID: %#v", j)
+	}
+	if j.Before.Platform != "linux" || j.Active.Platform != "linux" {
+		t.Fatalf("unexpected journal platform evidence: before=%q active=%q", j.Before.Platform, j.Active.Platform)
+	}
+	if status := m.NetworkJournalStatus(); !status.Open || status.Phase != "active" {
+		t.Fatalf("health-facing journal status is not active/open: %#v", status)
 	}
 
 	// The CI topology exposes one destination through two independent L3
@@ -149,7 +163,7 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 
 	cleanupDeadline := time.Now().Add(3 * time.Second)
 	for {
-		_, err := net.InterfaceByName("antigravity-tun")
+		_, err := net.InterfaceByName(agentTunName)
 		if err != nil {
 			break
 		}
@@ -157,6 +171,24 @@ func TestLinuxAgentTunnelRuntimeSmoke(t *testing.T) {
 			t.Fatalf("TUN interface still exists after shutdown; config=%s", filepath.Base(m.TunnelConfigPath()))
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	if _, err := os.Stat(m.networkJournalPath()); !os.IsNotExist(err) {
+		t.Fatalf("open network journal remains after graceful recovery: err=%v", err)
+	}
+	cleanRaw, err := os.ReadFile(m.lastCleanNetworkJournalPath())
+	if err != nil {
+		t.Fatalf("last-clean network evidence missing: %v", err)
+	}
+	var clean TunnelStateJournal
+	if err := json.Unmarshal(cleanRaw, &clean); err != nil {
+		t.Fatalf("decode last-clean network evidence: %v", err)
+	}
+	if clean.Phase != "clean" || clean.OperationID == "" || clean.PID != 0 {
+		t.Fatalf("last-clean evidence is incomplete: %#v", clean)
+	}
+	if status := m.NetworkJournalStatus(); status.Open {
+		t.Fatalf("health still reports open network journal after cleanup: %#v", status)
 	}
 }
 
