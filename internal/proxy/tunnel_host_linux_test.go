@@ -4,7 +4,9 @@ package proxy
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -45,5 +47,54 @@ func TestPrivilegeBootstrapDoesNotImplementPasswordPiping(t *testing.T) {
 		if !strings.Contains(s, required) {
 			t.Fatalf("privilege bootstrap security contract missing %q", required)
 		}
+	}
+}
+
+func TestPrivilegedManagedBinaryTargetAcceptsOwnedManagedLayout(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "AntigravitiProxi", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(binDir, "sing-box")
+	if err := os.WriteFile(binary, []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PKEXEC_UID", strconv.Itoa(os.Getuid()))
+	t.Setenv("SUDO_UID", "")
+	if err := validatePrivilegedManagedBinaryTarget(binary); err != nil {
+		t.Fatalf("valid managed target rejected: %v", err)
+	}
+}
+
+func TestPrivilegedManagedBinaryTargetRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	binDir := filepath.Join(root, "AntigravitiProxi", "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "real-sing-box")
+	if err := os.WriteFile(target, []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(binDir, "sing-box")
+	if err := os.Symlink(target, binary); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PKEXEC_UID", strconv.Itoa(os.Getuid()))
+	if err := validatePrivilegedManagedBinaryTarget(binary); err == nil || !strings.Contains(strings.ToLower(err.Error()), "symlink") {
+		t.Fatalf("symlink target should be rejected, got %v", err)
+	}
+}
+
+func TestPrivilegedManagedBinaryTargetRejectsUnexpectedLayout(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "sing-box")
+	if err := os.WriteFile(binary, []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PKEXEC_UID", strconv.Itoa(os.Getuid()))
+	if err := validatePrivilegedManagedBinaryTarget(binary); err == nil || !strings.Contains(err.Error(), "ownership boundary") {
+		t.Fatalf("unexpected layout should be rejected, got %v", err)
 	}
 }
