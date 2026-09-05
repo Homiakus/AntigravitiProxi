@@ -23,10 +23,3 @@ func TestInvalidTimeoutIsUsageError(t *testing.T) {
 		t.Fatalf("exit=%d want 2", got)
 	}
 }
-
-func exitCodeForReport(report antigravity.AgentDoctorReport, strict bool) int {
-	if strict && report.LikelyCause == "unknown" {
-		return 2
-	}
-	return 0
-}
