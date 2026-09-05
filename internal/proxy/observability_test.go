@@ -7,8 +7,8 @@ import (
 )
 
 func TestParseRuntimeConnections(t *testing.T) {
-	raw := "/opt/Antigravity/antigravity\tvpn-direct\tcloudcode-pa.googleapis.com:443\ttun/agent-tun\ttcp\n" +
-		"/usr/bin/curl\tsystem-direct\texample.com:443\ttun/agent-tun\ttcp\n"
+	raw := "10.0.0.2:51001\t/opt/Antigravity/antigravity\tvpn-direct\tcloudcode-pa.googleapis.com:443\ttun/agent-tun\ttcp\n" +
+		"10.0.0.2:51002\t/usr/bin/curl\tsystem-direct\texample.com:443\ttun/agent-tun\ttcp\n"
 	got, err := parseRuntimeConnections(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -16,16 +16,16 @@ func TestParseRuntimeConnections(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("got %d connections", len(got))
 	}
-	if got[0].Process != "/opt/Antigravity/antigravity" || got[0].Outbound != "vpn-direct" {
+	if got[0].Source != "10.0.0.2:51001" || got[0].Process != "/opt/Antigravity/antigravity" || got[0].Outbound != "vpn-direct" {
 		t.Fatalf("unexpected first connection: %#v", got[0])
 	}
-	if got[1].Outbound != "system-direct" {
+	if got[1].Source != "10.0.0.2:51002" || got[1].Outbound != "system-direct" {
 		t.Fatalf("unexpected second connection: %#v", got[1])
 	}
 }
 
 func TestParseRuntimeConnectionsRejectsSchemaDrift(t *testing.T) {
-	if _, err := parseRuntimeConnections("process\tvpn-direct\tdestination\n"); err == nil {
+	if _, err := parseRuntimeConnections("source\tprocess\tvpn-direct\tdestination\n"); err == nil {
 		t.Fatal("expected column-count mismatch to fail closed")
 	}
 }
