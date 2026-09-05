@@ -62,7 +62,7 @@ func (m *Manager) AgentTunnelPrivilegeHint() string {
 	case "windows":
 		return "Agent Tunnel creates a system TUN interface and normally requires AntigravitiProxi to run as Administrator."
 	case "linux":
-		return "Agent Tunnel requires a TUN-capable helper. For non-root operation grant managed sing-box CAP_NET_ADMIN,CAP_NET_RAW,CAP_SYS_PTRACE,CAP_DAC_READ_SEARCH so it can manage routes and attribute sockets to Antigravity processes."
+		return "Agent Tunnel keeps the control plane unprivileged. If TUN or managed sing-box capabilities are missing, AntigravitiProxi uses one fixed-function PolicyKit helper; the OS handles authentication and the helper re-verifies the managed binary before applying the exact required capabilities."
 	default:
 		return "Agent Tunnel is supported only on Windows and Linux."
 	}

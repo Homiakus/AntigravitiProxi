@@ -1,6 +1,6 @@
 # Linux — эксплуатация, права и проверка Agent Tunnel
 
-Этот документ описывает Linux-специфичную часть AntigravitiProxi. Цель — запускать UI/control-plane и Antigravity IDE от обычного пользователя, а повышенные права давать только управляемому `sing-box` helper.
+Этот документ описывает Linux-специфичную ветку AntigravitiProxi. Нормальная модель: UI/control plane и Antigravity IDE работают от обычного desktop user, а необходимые TUN/process-inspection privileges получает только hash-verified managed `sing-box` через bounded OS authorization flow.
 
 ## Поддерживаемая схема
 
@@ -14,29 +14,29 @@ user session
       ├── CAP_SYS_PTRACE
       ├── CAP_DAC_READ_SEARCH
       ├── TUN: antigravity-tun
-      ├── auto_route
-      ├── strict_route
+      ├── auto_route=true
+      ├── strict_route=true
+      ├── auto_redirect=false
       └── process_name / process_path policy
 ```
 
-SAFE MODE не требует TUN и обычно не требует повышенных прав.
+SAFE MODE не требует TUN и обычно не требует повышения прав.
 
 Agent Tunnel использует:
 
-- `sing-box` 1.14.0;
+- pinned `sing-box 1.14.0`;
 - `/dev/net/tun`;
-- `auto_route`;
-- `strict_route=true` на Linux;
-- `auto_redirect=false` в текущем process-isolation профиле;
+- `auto_route=true`;
+- `strict_route=true`;
+- `auto_redirect=false`;
 - process matching для Antigravity/language server/helper процессов;
 - `bind_interface` к явно выбранному VPN-интерфейсу;
-- `system-direct` для unrelated traffic после захвата TUN.
+- `vpn-direct` для Antigravity path;
+- `system-direct` для unrelated traffic.
 
-### Почему сейчас `auto_redirect=false`
+## Почему `auto_redirect=false`
 
-Официальная документация sing-box в общем случае рекомендует Linux `auto_redirect` из-за производительности и совместимости с Docker. Но для нашей более узкой задачи обнаружился важный конфликт семантики: в sing-box 1.14 fallback `ip rule`, создаваемый `auto_redirect`, проверяется после системных `main/default` rules. При существующем обычном default route локальный процесс может уйти через него до попадания в TUN, а значит `process_name/process_path` policy вообще не увидит соединение.
-
-Мы воспроизвели это отдельным dual-egress тестом: при `auto_redirect=true` процесс с `/proc/self/comm=antigravity` сохранял системный egress. После перехода на `auto_route + strict_route` без `auto_redirect` тот же runtime-тест доказал:
+Для нашей process-aware topology runtime evidence важнее generic recommendation. В dual-egress fixture `auto_redirect=true` позволял существующему системному default route решить путь локального процесса до попадания в TUN policy. После перехода на `auto_route + strict_route` без `auto_redirect` тот же тест доказал:
 
 ```text
 antigravity         -> vpn-direct    -> vpn0
@@ -45,11 +45,11 @@ bundled .../node    -> vpn-direct    -> vpn0   (process_path_regex)
 ordinary process    -> system-direct -> sys0
 ```
 
-Поэтому `auto_redirect=false` — не случайная настройка, а зафиксированный архитектурный инвариант текущей Linux реализации. Риск возможных конфликтов с Docker/VM/NetworkManager отдельно отслеживается FMEA как R-013.
+Поэтому `auto_redirect=false` — архитектурный инвариант текущего Linux профиля. Возможные конфликты со сложной Docker/VM/NetworkManager topology отдельно отслеживаются как R-013.
 
 ## Рекомендуемая установка
 
-Сначала запустите AntigravitiProxi как обычный пользователь и дайте ему установить managed `sing-box`:
+Запускайте приложение **обычным пользователем**:
 
 ```bash
 git clone https://github.com/Homiakus/AntigravitiProxi.git
@@ -57,94 +57,120 @@ cd AntigravitiProxi
 go run ./cmd/antigraviti-proxi
 ```
 
-По умолчанию managed binary находится примерно здесь:
+Managed binary обычно находится здесь:
 
 ```text
 ~/.config/AntigravitiProxi/bin/sing-box
 ```
 
-Проверьте фактический путь в web UI или:
+Дальше штатный сценарий выполняется из UI:
 
-```bash
-find "${XDG_CONFIG_HOME:-$HOME/.config}/AntigravitiProxi" -type f -name sing-box -print
-```
+1. подключите VPN;
+2. выберите VPN interface; если подходящий кандидат ровно один, UI может выбрать его автоматически;
+3. нажмите **«Подготовить Tunnel и запустить IDE»**;
+4. если Linux host ещё не готов, появится один системный PolicyKit authentication dialog;
+5. после подтверждения AntigravitiProxi автоматически подготовит TUN/capabilities, запустит tunnel и проверит runtime readiness.
 
-Для полноценного **process-aware Agent Tunnel** выдайте capabilities только helper-бинарнику:
+Вручную выполнять `modprobe`/`setcap` перед штатным запуском больше не требуется.
 
-```bash
-BIN="${XDG_CONFIG_HOME:-$HOME/.config}/AntigravitiProxi/bin/sing-box"
+## Что делает автоматический privilege bootstrap
 
-sudo setcap cap_net_admin,cap_net_raw,cap_sys_ptrace,cap_dac_read_search+ep "$BIN"
+Обычный user process сначала проверяет `/dev/net/tun` и текущие file capabilities. Если всё готово, повышение прав не происходит.
 
-getcap "$BIN"
-```
-
-Ожидаемый результат должен содержать все четыре capability:
+Если подготовка нужна:
 
 ```text
-cap_net_admin,cap_net_raw,cap_sys_ptrace,cap_dac_read_search=ep
+AntigravitiProxi (user)
+    ↓
+pkexec / PolicyKit
+    ↓
+то же AntigravitiProxi executable
+    ↓
+__linux-privileged-setup (fixed-function mode)
+    ├── verify expected managed path
+    ├── reject symlink / unexpected ownership
+    ├── verify expected SHA-256
+    ├── modprobe tun, only if needed
+    ├── install libcap tooling, only if needed
+    ├── setcap exact capability set
+    ├── verify SHA-256 again
+    └── verify capabilities
+    ↓
+return to ordinary user process
+```
+
+Helper не принимает произвольную команду. Пароль приложение не читает, не хранит и не пишет в stdin. На desktop предпочтителен PolicyKit. Если PolicyKit недоступен, но программа запущена из интерактивного терминала, предусмотрен `sudo` fallback в этом терминале.
+
+Выдаётся ровно:
+
+```text
+cap_net_admin,cap_net_raw,cap_sys_ptrace,cap_dac_read_search+ep
 ```
 
 Назначение:
 
-- `CAP_NET_ADMIN` — TUN, routes/policy routing;
-- `CAP_NET_RAW` — сетевые операции, нужные transparent path;
-- `CAP_SYS_PTRACE` — process/socket attribution через Linux process finder;
-- `CAP_DAC_READ_SEARCH` — чтение необходимой `/proc`/process metadata независимо от обычных DAC ограничений.
+- `CAP_NET_ADMIN` — TUN и policy routing;
+- `CAP_NET_RAW` — операции transparent data plane;
+- `CAP_SYS_PTRACE` — process/socket attribution;
+- `CAP_DAC_READ_SEARCH` — чтение требуемой `/proc` metadata для точного ownership proof.
 
-Последние две capability нужны не для самого создания TUN, а для главного инварианта Agent Tunnel: `process_name/process_path` должны действительно идентифицировать локальный Antigravity process. Именно поэтому preflight теперь проверяет их отдельно.
+## Обновление managed sing-box и R-012
 
-После обновления/replacement managed `sing-box` file capabilities могут исчезнуть, поскольку capabilities привязаны к inode файла. В этом случае AntigravitiProxi останавливает Agent Tunnel на preflight и выдаёт точную команду `setcap`. Это известный FMEA риск R-012; автоматическое capability-preserving обновление запланировано.
+File capabilities привязаны к inode, поэтому replacement binary может их потерять. Теперь это не требует заранее вручную чинить `setcap`: при следующем явном старте Agent Tunnel ordinary-user readiness check обнаруживает потерю capabilities и вызывает тот же fixed-function PolicyKit helper, который повторно проверяет binary и восстанавливает точный capability set.
+
+R-012 остаётся в состоянии `mitigating`, пока не завершена отдельная upgrade fixture, доказывающая этот сценарий на реальном ordinary-user desktop authorization path для всех поддерживаемых distro.
+
+## Ручной fallback
+
+Используйте только если PolicyKit недоступен/отказан и нужно вручную восстановить host:
+
+```bash
+BIN="${XDG_CONFIG_HOME:-$HOME/.config}/AntigravitiProxi/bin/sing-box"
+
+sudo modprobe tun
+sudo setcap cap_net_admin,cap_net_raw,cap_sys_ptrace,cap_dac_read_search+ep "$BIN"
+getcap "$BIN"
+```
+
+Ожидаемый capability set должен содержать все четыре capability. Это troubleshooting path, а не нормальная установка.
 
 ## Не запускать IDE от root
 
-Предпочтительный режим — AntigravitiProxi и Antigravity работают от обычного desktop-пользователя, а capabilities находятся на `sing-box`.
+Предпочтительный режим — AntigravitiProxi и Antigravity работают от desktop user.
 
-Если control-plane всё же был запущен через `sudo`/`pkexec`, Linux launcher:
+Если control plane всё же был запущен через `sudo`/`pkexec`, Linux launcher:
 
 1. определяет исходного пользователя по `SUDO_UID`/`PKEXEC_UID`;
 2. использует его home/config для поиска Antigravity settings;
-3. перед запуском IDE сбрасывает UID/GID обратно на desktop-пользователя;
+3. перед запуском IDE сбрасывает UID/GID обратно;
 4. восстанавливает `HOME`, `USER`, `LOGNAME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`;
 5. при наличии `/run/user/<uid>` восстанавливает `XDG_RUNTIME_DIR` и DBus session address.
 
-Если исходного desktop-пользователя безопасно определить нельзя, launcher отказывается запускать Antigravity как root.
+Если исходного desktop user нельзя безопасно определить, launcher отказывается запускать Antigravity как root.
 
-## Проверка ядра
+## Проверка ядра и host readiness
 
 ```bash
 set -e
 
 test -e /dev/net/tun && echo "TUN: OK" || echo "TUN: MISSING"
+command -v getcap >/dev/null && \
+  getcap "${XDG_CONFIG_HOME:-$HOME/.config}/AntigravitiProxi/bin/sing-box" || true
 
-lsmod | grep -E '(^| )(tun|nf_tables|nfnetlink_queue)( |$)' || true
-
-command -v nft >/dev/null && nft --version || true
-command -v ip  >/dev/null && ip -Version || true
-```
-
-Если `/dev/net/tun` отсутствует:
-
-```bash
-sudo modprobe tun
-```
-
-`nf_tables/nfnetlink_queue` больше не являются обязательным условием для текущего Agent Tunnel профиля, потому что `auto_redirect=false`, но они остаются важны для будущих альтернативных routing profiles и для диагностики конфликтов хоста.
-
-## Проверка VPN-интерфейса
-
-Agent Tunnel не стартует с несуществующим или выключенным upstream-интерфейсом.
-
-Посмотреть интерфейсы:
-
-```bash
 ip -br link
 ip -br addr
+ip rule
 ip route
 ip -6 route
 ```
 
-Примеры имён:
+Если `/dev/net/tun` отсутствует, штатный Agent Tunnel start попробует загрузить `tun` через bounded helper. `sudo modprobe tun` нужен только как manual troubleshooting fallback.
+
+## Проверка VPN-интерфейса
+
+Agent Tunnel не стартует с несуществующим или DOWN upstream interface.
+
+Примеры:
 
 ```text
 wg0
@@ -156,7 +182,7 @@ tun0
 tailscale0
 ```
 
-В web UI нужно выбрать именно фактическое имя интерфейса, которое присутствует в `ip link` и находится в состоянии `UP`.
+В UI выбирайте фактический интерфейс, который присутствует в `ip link` и находится в состоянии `UP`.
 
 ## Проверка SAFE MODE
 
@@ -172,38 +198,52 @@ ip link show antigravity-tun 2>/dev/null && echo "unexpected TUN" || echo "SAFE:
 curl -x http://127.0.0.1:7890 -I https://cloudcode-pa.googleapis.com/
 ```
 
-Любой настоящий HTTP response code подтверждает, что HTTP CONNECT дошёл до backend; `404` на корневом пути допустим и не означает сетевую ошибку.
+Любой настоящий HTTP response code подтверждает, что CONNECT дошёл до backend; `404` на root path допустим и не означает сетевую ошибку.
 
 ## Проверка Agent Tunnel
 
-После нажатия **Agent Tunnel + запустить IDE**:
+После **«Подготовить Tunnel и запустить IDE»**:
 
 ```bash
 ip -details link show antigravity-tun
 ip addr show dev antigravity-tun
 ip rule
-ip route show table all | grep -E 'antigravity|172\.31\.255|2022|9000' || true
-```
+ip route show table all | grep -E 'antigravity|172\.31\.255|20229|1900' || true
 
-Проверка capabilities:
-
-```bash
 BIN="${XDG_CONFIG_HOME:-$HOME/.config}/AntigravitiProxi/bin/sing-box"
 getcap "$BIN"
 ```
 
-Параллельно mixed proxy остаётся доступен для диагностических запросов:
+Mixed proxy остаётся доступен для диагностики:
 
 ```bash
 curl -x http://127.0.0.1:7890 -I https://oauth2.googleapis.com/
 curl -x http://127.0.0.1:7890 -I https://cloudcode-pa.googleapis.com/
 ```
 
+Но главный production signal находится в UI **Runtime network assurance** и `GET /api/attestation`, а не в одном факте доступности 7890.
+
+## Runtime assurance
+
+Система связывает:
+
+```text
+Antigravity PID tree
+    ↓
+live socket/source endpoint
+    ↓
+sing-box connection tracker
+    ↓
+vpn-direct
+    ↓
+external egress
+```
+
+UI отдельно показывает `Assurance` и `Isolation`. При включённом domain fallback возможно `VERIFIED` transport evidence при `ISOLATION-RELAXED` policy — эти состояния намеренно не смешиваются.
+
 ## Проверка cleanup
 
-Нормальная остановка Agent Tunnel должна убрать TUN и созданные route state.
-
-После **Остановить Tunnel**:
+После **Остановить**:
 
 ```bash
 if ip link show antigravity-tun >/dev/null 2>&1; then
@@ -214,45 +254,33 @@ else
 fi
 ```
 
-На Linux managed `sing-box` получает `SIGTERM`, а не немедленный `SIGKILL`, чтобы успеть убрать маршруты. Если Go control-plane аварийно исчезает, дочернему `sing-box` задан `PDEATHSIG=SIGTERM`, поэтому helper не должен оставаться бесхозным. SIGKILL/power-loss всё ещё требуют startup stale-state recovery — FMEA R-010/R-016.
+Managed sing-box получает `SIGTERM`; kill остаётся только bounded fallback. При исчезновении parent control plane Linux child получает `PDEATHSIG=SIGTERM`. Для SIGKILL/power-loss используется durable network journal и next-start conservative recovery.
 
-## Что теперь доказывает CI
+## Что доказывает CI
 
-Linux CI создаёт **две независимые L3 uplink-сети** внутри изолированных network namespaces:
+Linux CI создаёт две независимые L3 uplink-сети в network namespaces:
 
 ```text
 client namespace
-├── sys0  10.251.0.2  metric 10   ← обычный default
-└── vpn0  10.250.0.2  metric 100  ← выбранный VPN
+├── sys0  10.251.0.2  metric 10
+└── vpn0  10.250.0.2  metric 100
 
 sink namespace
 └── 203.0.113.10:18080
-    возвращает source IP клиента
 ```
 
-Затем запускается настоящий pinned `sing-box 1.14.0` и детерминированные Go probe-бинарники. Проверяется:
+Настоящий pinned `sing-box 1.14.0` проверяется не только через `sing-box check`, но и runtime:
 
-1. `antigravity-tun` реально создан;
-2. mixed listener жив;
-3. бинарник с process name `antigravity` виден серверу как `10.250.0.2`;
-4. `language_server` виден как `10.250.0.2`;
-5. generic `node`, расположенный внутри пути `.../antigravity-bundle/node`, также виден как `10.250.0.2` — это проверка `process_path_regex`;
-6. обычный `agp-egress-probe` виден как `10.251.0.2` — отрицательная проверка isolation;
-7. выполняется graceful stop;
-8. `antigravity-tun` исчезает.
+1. создаётся `antigravity-tun`;
+2. mixed listener принадлежит managed PID;
+3. `antigravity` выходит через `10.250.0.2`;
+4. `language_server` выходит через `10.250.0.2`;
+5. bundled `.../antigravity-bundle/node` выходит через `10.250.0.2` по `process_path_regex`;
+6. ordinary probe остаётся на `10.251.0.2`;
+7. PID/socket/outbound/external-egress chain проверяется end-to-end;
+8. graceful/crash recovery проверяет owned cleanup и сохранение unrelated network state.
 
-Таким образом CI доказывает не только «конфиг принят» или «TUN существует», а фактический **dual-egress source-interface invariant**.
-
-Отдельно CI продолжает выполнять:
-
-- `go test ./...`;
-- `go vet ./...`;
-- `go run ./cmd/riskcheck`;
-- real `sing-box check` generated config;
-- Linux amd64 build;
-- Linux arm64 build.
-
-Runtime TUN/dual-egress сейчас выполняется на Ubuntu GitHub runner amd64. ARM64 компилируется, но privileged TUN runtime на реальном ARM64 runner пока не доказан — FMEA R-018.
+CI также выполняет `go test ./...`, `go vet ./...`, race detector, `riskcheck`, real sing-box config validation и Windows/Linux build matrix.
 
 ## Диагностические команды
 
@@ -291,9 +319,9 @@ ss -lntup | grep -E ':48765|:7890' || true
 
 ## Известные границы
 
-- privileged runtime/dual-egress proof сейчас покрывает Ubuntu amd64;
-- Linux ARM64 пока build-only;
-- Debian/Fedora family, NetworkManager/systemd-networkd и Docker/Podman/VM combinations требуют отдельного runtime matrix — R-013/R-018;
-- CI доказывает routing policy синтетических процессов, но production health ещё должен доказать egress **реального обнаруженного PID tree Antigravity** на пользовательском хосте — R-002/R-015;
+- privileged runtime/dual-egress proof сейчас strongest на Ubuntu amd64;
+- Linux ARM64 остаётся build-only, пока нет native privileged runner — R-018;
+- Debian/Fedora family и NetworkManager/systemd-networkd/Docker/Podman/VM combinations требуют расширенного runtime matrix — R-013/R-018;
 - IPv6, UDP/QUIC и dual-stack DNS должны проверяться независимо — R-005;
-- `auto_redirect=false` усиливает determinism process routing, но потенциально повышает риск конфликтов с сложной host routing topology; поэтому route-conflict preflight является обязательным P1 hardening, а не необязательной оптимизацией.
+- Windows ещё не имеет Linux-equivalent minimal privilege helper и полного external-egress Agent Tunnel runtime proof;
+- автоматический Linux capability repair реализован, но отдельная ordinary-user upgrade/distro fixture для R-012 ещё требуется.
