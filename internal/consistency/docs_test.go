@@ -113,6 +113,22 @@ func TestCanonicalDocsMatchCurrentRoutingAndPrivilegeModel(t *testing.T) {
 		"перезапустить AntigravitiProxi с нужными правами",
 	)
 
+	fmea := readRepoFile(t, root, "docs/ARCHITECTURE_FMEA.md")
+	requireAll(t, "docs/ARCHITECTURE_FMEA.md", fmea,
+		"auto_redirect=false",
+		"fixed-function PolicyKit helper",
+		"R-023 закрыт",
+		"R-008 закрыт",
+		"R-012 остаётся mitigating",
+		"Windows minimal UAC helper",
+	)
+	forbidAll(t, "docs/ARCHITECTURE_FMEA.md", fmea,
+		"Остаётся R-023: отсутствие digest сейчас должно стать fail-closed",
+		"Архитектурно правильнее всё равно перейти к отдельному минимальному privileged helper",
+		"Health model пока слишком бинарный",
+		"Применение сетевых изменений не транзакционно",
+	)
+
 	plan := readRepoFile(t, root, "MASTER_PLAN.md")
 	requireAll(t, "MASTER_PLAN.md", plan,
 		"[x] Linux fixed-function one-shot PolicyKit helper",
