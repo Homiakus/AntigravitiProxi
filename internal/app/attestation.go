@@ -30,16 +30,14 @@ type NetworkAttestationReport struct {
 }
 
 // networkAttestation composes independent evidence instead of treating one
-// green signal as proof of the whole transport path. In particular, external
-// observer failure is "partial" evidence, not a claim that routing is wrong;
-// an unexpected outbound or ambiguous PID/socket ownership is degraded.
+// green signal as proof of the whole transport path. Public observers are only
+// queried when there is an attributable live Agent connection, avoiding
+// unnecessary privacy-sensitive/network-dependent work while the IDE is idle.
 func (s *Server) networkAttestation(ctx context.Context) NetworkAttestationReport {
-	r := NetworkAttestationReport{
-		State:      AssuranceIdle,
-		ObservedAt: time.Now().UTC(),
-	}
-	if s.pm.Mode() != proxy.ModeAgentTunnel || !s.pm.AgentTunnelActive() {
-		r.Detail = "Agent Tunnel is not active"
+	r := NetworkAttestationReport{ObservedAt: time.Now().UTC()}
+	tunnelActive := s.pm.Mode() == proxy.ModeAgentTunnel && s.pm.AgentTunnelActive()
+	if !tunnelActive {
+		r.State, r.Detail = classifyNetworkAttestation(false, r)
 		return r
 	}
 
@@ -52,62 +50,56 @@ func (s *Server) networkAttestation(ctx context.Context) NetworkAttestationRepor
 	}
 	r.Route = s.pm.AttestAgentRoutes(ctx)
 	r.PIDRoute = s.pm.AttestAgentPIDRoutes(ctx, pids)
-	r.Egress = s.pm.AttestPublicEgress(ctx)
+	if len(r.PIDRoute.ActiveCandidatePIDs) > 0 {
+		r.Egress = s.pm.AttestPublicEgress(ctx)
+	} else {
+		r.Egress.Detail = "external egress not probed because no attributable live Antigravity connection is active"
+	}
+	r.State, r.Detail = classifyNetworkAttestation(true, r)
+	return r
+}
 
+// classifyNetworkAttestation is deliberately pure: policy decisions can be
+// regression-tested independently from platform routing and public observers.
+// Strong verification requires complete identity, exact socket ownership,
+// vpn-direct for every active attributed PID, and fresh external egress
+// evidence. Missing evidence is partial; contradictory/ambiguous evidence is
+// degraded.
+func classifyNetworkAttestation(tunnelActive bool, r NetworkAttestationReport) (AssuranceState, string) {
+	if !tunnelActive {
+		return AssuranceIdle, "Agent Tunnel is not active"
+	}
 	if !r.ProcessTree.Complete {
-		r.State = AssuranceDegraded
-		r.Detail = "Antigravity process-tree inventory is incomplete: " + r.ProcessTree.Detail
-		return r
+		return AssuranceDegraded, "Antigravity process-tree inventory is incomplete: " + r.ProcessTree.Detail
 	}
 	if len(r.ProcessTree.UnknownHelpers) > 0 {
-		r.State = AssuranceDegraded
-		r.Detail = fmt.Sprintf("%d unknown Antigravity descendant(s) require explicit review", len(r.ProcessTree.UnknownHelpers))
-		return r
+		return AssuranceDegraded, fmt.Sprintf("%d unknown Antigravity descendant(s) require explicit review", len(r.ProcessTree.UnknownHelpers))
 	}
 	if r.Route.Available && r.Route.AgentUnexpected > 0 {
-		r.State = AssuranceDegraded
-		r.Detail = r.Route.Detail
-		return r
+		return AssuranceDegraded, r.Route.Detail
 	}
 	if r.PIDRoute.Available && len(r.PIDRoute.UnexpectedPIDs) > 0 {
-		r.State = AssuranceDegraded
-		r.Detail = r.PIDRoute.Detail
-		return r
+		return AssuranceDegraded, r.PIDRoute.Detail
 	}
 	if r.PIDRoute.Available && (r.PIDRoute.AmbiguousConnections > 0 || len(r.PIDRoute.UnresolvedAgentPaths) > 0) {
-		r.State = AssuranceDegraded
-		r.Detail = r.PIDRoute.Detail
-		return r
+		return AssuranceDegraded, r.PIDRoute.Detail
 	}
 	if len(r.ProcessTree.Processes) == 0 {
-		r.State = AssurancePartial
-		r.Detail = "Agent Tunnel is active, but no running Antigravity process tree is available to attest"
-		return r
+		return AssurancePartial, "Agent Tunnel is active, but no running Antigravity process tree is available to attest"
 	}
 	if !r.Route.Available || !r.PIDRoute.Available {
-		r.State = AssurancePartial
-		r.Detail = "Agent Tunnel is active, but live route/PID evidence is not currently available"
-		return r
+		return AssurancePartial, "Agent Tunnel is active, but live route/PID evidence is not currently available"
 	}
 	if len(r.PIDRoute.ActiveCandidatePIDs) == 0 {
-		r.State = AssurancePartial
-		r.Detail = "Antigravity processes are present but currently have no attributable live network connection"
-		return r
-	}
-	if !r.Egress.Available {
-		r.State = AssurancePartial
-		r.Detail = "PID and route evidence is healthy, but external egress observation is unavailable"
-		return r
+		return AssurancePartial, "Antigravity processes are present but currently have no attributable live network connection"
 	}
 	if len(r.PIDRoute.VPNDirectPIDs) != len(r.PIDRoute.ActiveCandidatePIDs) {
-		r.State = AssuranceDegraded
-		r.Detail = "not every active attributable Antigravity PID is proven on vpn-direct"
-		return r
+		return AssuranceDegraded, "not every active attributable Antigravity PID is proven on vpn-direct"
 	}
-
-	r.State = AssuranceVerified
-	r.Detail = fmt.Sprintf("%d active Antigravity PID(s) are exactly attributed to vpn-direct and external VPN egress is observable", len(r.PIDRoute.ActiveCandidatePIDs))
-	return r
+	if !r.Egress.Available {
+		return AssurancePartial, "PID and route evidence is healthy, but external egress observation is unavailable"
+	}
+	return AssuranceVerified, fmt.Sprintf("%d active Antigravity PID(s) are exactly attributed to vpn-direct and external VPN egress is observable", len(r.PIDRoute.ActiveCandidatePIDs))
 }
 
 func (s *Server) handleNetworkAttestation(w http.ResponseWriter, req *http.Request) {
