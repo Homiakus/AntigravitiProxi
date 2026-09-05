@@ -56,6 +56,21 @@
         <div class="hint" id="tunnel-hint">Windows: обычно нужны права Administrator. Linux: root/CAP_NET_ADMIN.</div>
       </section>
 
+      <section class="panel assurance-panel">
+        <div class="panel-title">
+          <span>Runtime network assurance</span>
+          <button class="ghost" data-action="attestation">Показать evidence</button>
+        </div>
+        <p class="tunnel-copy">Независимая проверка цепочки <span class="mono">process tree → live socket/PID → sing-box outbound → vpn-direct → внешний egress</span>. Состояние <span class="mono">VERIFIED</span> выставляется только когда все активные атрибутированные процессы доказанно идут через выбранный VPN.</p>
+        <div class="status-grid">
+          <div class="metric"><span>Assurance</span><strong id="assurance-state">—</strong></div>
+          <div class="metric"><span>PID route</span><strong id="assurance-pids">—</strong></div>
+          <div class="metric"><span>External egress</span><strong id="assurance-egress">—</strong></div>
+          <div class="metric"><span>Evidence age</span><strong id="assurance-age">—</strong></div>
+        </div>
+        <div class="hint" id="assurance-detail">Ожидание runtime evidence…</div>
+      </section>
+
       <section class="panel">
         <div class="panel-title"><span>Маршрут</span><span class="muted">DoH → sing-box → VPN interface → Google</span></div>
         <div class="form-grid">
