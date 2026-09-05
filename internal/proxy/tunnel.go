@@ -225,7 +225,11 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 		// test proved that its Linux fallback rule can allow the host default
 		// route to win before process classification. Capture first with
 		// auto_route+strict_route, then return unrelated flows via system-direct.
+		// Pin sing-box's iproute2 namespace so the recovery journal can prove
+		// ownership before mutation and recover without broad route deletion.
 		tunInbound["auto_redirect"] = false
+		tunInbound["iproute2_table_index"] = linuxTunnelRouteTableIndex
+		tunInbound["iproute2_rule_index"] = linuxTunnelRuleStart
 	}
 
 	routeRules := []any{
