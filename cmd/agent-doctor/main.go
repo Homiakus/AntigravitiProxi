@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -11,18 +13,43 @@ import (
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+func run(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("agent-doctor", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	strictExit := fs.Bool("strict-exit", false, "return exit code 2 when the diagnostic result is inconclusive")
+	timeout := fs.Duration("timeout", 45*time.Second, "maximum log-scan duration")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *timeout <= 0 {
+		fmt.Fprintln(stderr, "timeout must be greater than zero")
+		return 2
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
 	report := antigravity.AgentDoctor(ctx)
-	enc := json.NewEncoder(os.Stdout)
+	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(report); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
 
-	if report.LikelyCause == "unknown" {
-		os.Exit(2)
+	// "unknown" means the scan completed but did not contain a sufficiently
+	// specific known signature. That is an inconclusive diagnostic result, not
+	// a CLI execution failure. Keep non-zero behavior available for scripts that
+	// deliberately want to gate on diagnostic certainty.
+	if *strictExit && report.LikelyCause == "unknown" {
+		return 2
 	}
+	if ctx.Err() != nil && report.FilesScanned == 0 {
+		fmt.Fprintln(stderr, "Agent Doctor timed out before any log file was scanned")
+		return 1
+	}
+	return 0
 }
