@@ -113,11 +113,16 @@ jobs:
           sudo ip netns exec "${SINK_NS}" ip link set agp-sysp up
 
           cat >/tmp/agp-source-server.py <<'PY'
+          import time
           from http.server import BaseHTTPRequestHandler, HTTPServer
 
           class Handler(BaseHTTPRequestHandler):
               def do_GET(self):
                   body = self.client_address[0].encode("ascii")
+                  if self.path.startswith("/hold"):
+                      # Keep the originating process socket alive so the test can
+                      # join sing-box source metadata to /proc inode/PID ownership.
+                      time.sleep(5)
                   self.send_response(200)
                   self.send_header("Content-Type", "text/plain")
                   self.send_header("Content-Length", str(len(body)))
