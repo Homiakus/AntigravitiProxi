@@ -20,7 +20,7 @@ func TestDomainFallbackControlIsWiredThroughUI(t *testing.T) {
 	for _, want := range []string{
 		`id="tunnel-domain-fallback"`,
 		`Domain fallback`,
-		`ISOLATION-RELAXED`,
+		`слабее process isolation`,
 		`id="assurance-isolation"`,
 		`id="assurance-isolation-detail"`,
 	} {
