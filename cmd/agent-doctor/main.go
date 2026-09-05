@@ -40,16 +40,20 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	if ctx.Err() != nil && report.FilesScanned == 0 {
+		fmt.Fprintln(stderr, "Agent Doctor timed out before any log file was scanned")
+		return 1
+	}
+	return exitCodeForReport(report, *strictExit)
+}
+
+func exitCodeForReport(report antigravity.AgentDoctorReport, strict bool) int {
 	// "unknown" means the scan completed but did not contain a sufficiently
 	// specific known signature. That is an inconclusive diagnostic result, not
 	// a CLI execution failure. Keep non-zero behavior available for scripts that
 	// deliberately want to gate on diagnostic certainty.
-	if *strictExit && report.LikelyCause == "unknown" {
+	if strict && report.LikelyCause == "unknown" {
 		return 2
-	}
-	if ctx.Err() != nil && report.FilesScanned == 0 {
-		fmt.Fprintln(stderr, "Agent Doctor timed out before any log file was scanned")
-		return 1
 	}
 	return 0
 }
