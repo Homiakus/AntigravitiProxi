@@ -50,6 +50,44 @@ func capturePlatformNetworkSnapshot(ctx context.Context) (NetworkSnapshot, error
 	return s, nil
 }
 
+// preflightPlatformNetworkOwnership proves the routing namespace reserved for
+// Agent Tunnel is empty before sing-box is allowed to mutate host networking.
+// This converts recovery from heuristic ownership inference into a fail-closed
+// contract: anything found in table 20229 or priority range 19000..19031 was
+// not created by the new operation and therefore blocks startup.
+func preflightPlatformNetworkOwnership(before NetworkSnapshot) error {
+	reservedTable := strconv.Itoa(linuxTunnelRouteTableIndex)
+	for _, family := range []struct {
+		name   string
+		routes []string
+	}{
+		{name: "IPv4", routes: before.RoutesV4},
+		{name: "IPv6", routes: before.RoutesV6},
+	} {
+		for _, line := range family.routes {
+			if routeTable(line) == reservedTable {
+				return fmt.Errorf("reserved Linux %s route table %s is already occupied: %s", family.name, reservedTable, line)
+			}
+		}
+	}
+
+	for _, family := range []struct {
+		name  string
+		rules []string
+	}{
+		{name: "IPv4", rules: before.RulesV4},
+		{name: "IPv6", rules: before.RulesV6},
+	} {
+		for _, line := range family.rules {
+			priority, ok := rulePriority(line)
+			if ok && priority >= linuxTunnelRuleStart && priority <= linuxTunnelRuleEnd {
+				return fmt.Errorf("reserved Linux %s rule priority %d is already occupied: %s", family.name, priority, line)
+			}
+		}
+	}
+	return nil
+}
+
 func commandLines(ctx context.Context, name string, args ...string) ([]string, error) {
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {
@@ -69,11 +107,15 @@ func recoverPlatformOwnedNetworkState(ctx context.Context, j TunnelStateJournal)
 	}
 
 	for _, p := range j.Owned.NewRulePrioritiesV4 {
-		_ = deleteRulePriority(ctx, "-4", p)
+		if err := deleteRulePriority(ctx, "-4", p); err != nil {
+			return actions, err
+		}
 		actions = append(actions, fmt.Sprintf("removed owned IPv4 rule priority %d if present", p))
 	}
 	for _, p := range j.Owned.NewRulePrioritiesV6 {
-		_ = deleteRulePriority(ctx, "-6", p)
+		if err := deleteRulePriority(ctx, "-6", p); err != nil {
+			return actions, err
+		}
 		actions = append(actions, fmt.Sprintf("removed owned IPv6 rule priority %d if present", p))
 	}
 	for _, table := range j.Owned.NewRouteTablesV4 {
@@ -103,9 +145,9 @@ func recoverPlatformOwnedNetworkState(ctx context.Context, j TunnelStateJournal)
 }
 
 func deleteRulePriority(ctx context.Context, family string, priority int) error {
-	// A priority can theoretically contain multiple rules. Remove only entries
-	// that currently occupy a priority which did not exist in the durable
-	// baseline; cap the loop to avoid pathological command behavior.
+	// A priority can theoretically contain multiple rules. The entire configured
+	// range was proven empty before this operation, so any rule that later
+	// appears inside it belongs to this Agent Tunnel transaction.
 	for i := 0; i < 8; i++ {
 		out, err := exec.CommandContext(ctx, "ip", family, "rule", "del", "priority", strconv.Itoa(priority)).CombinedOutput()
 		if err != nil {
