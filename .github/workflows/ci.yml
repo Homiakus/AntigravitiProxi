@@ -26,6 +26,19 @@ jobs:
           AGP_LIVE_SINGBOX_SCHEMA: '1'
         run: go test ./internal/proxy -run TestAgentTunnelSchemaWithPinnedSingBox -count=1 -v
 
+  windows-unit:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: true
+      - name: Run native Windows unit tests
+        run: go test ./internal/proxy ./internal/antigravity ./internal/app
+      - name: Vet Windows-specific packages
+        run: go vet ./internal/proxy ./internal/antigravity ./internal/app
+
   linux-tun-runtime:
     runs-on: ubuntu-latest
     steps:
