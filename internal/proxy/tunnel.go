@@ -30,55 +30,26 @@ type AgentTunnelOptions struct {
 }
 
 func DefaultAgentTunnelOptions() AgentTunnelOptions {
-	// Linux must actually bring ordinary local TCP/UDP connections through the
-	// TUN before process_name/process_path policy can be authoritative. We use
-	// strict routing on Linux and prove the negative invariant in CI: an
-	// unrelated process still exits through system-direct. Windows keeps the
-	// less intrusive default because strict_route can conflict with desktop
-	// networking/VM software there.
 	strictRoute := runtime.GOOS == "linux"
-
 	return AgentTunnelOptions{
 		ProcessNames: []string{
-			"Antigravity.exe",
-			"antigravity.exe",
-			"antigravity",
-			"antigravity-desktop",
-			"language_server.exe",
-			"language_server_windows_x64.exe",
-			"language_server_windows_arm64.exe",
-			"language_server_linux_x64",
-			"language_server_linux_arm64",
-			"language_server",
-			"agy.exe",
-			"agy",
+			"Antigravity.exe", "antigravity.exe", "antigravity", "antigravity-desktop",
+			"language_server.exe", "language_server_windows_x64.exe", "language_server_windows_arm64.exe",
+			"language_server_linux_x64", "language_server_linux_arm64", "language_server", "agy.exe", "agy",
 		},
-		ProcessPathRegex: []string{
-			`(?i).*antigravity.*`,
-			`(?i).*language[_-]?server.*`,
-		},
+		ProcessPathRegex: []string{`(?i).*antigravity.*`, `(?i).*language[_-]?server.*`},
 		TargetDomains: []string{
-			"antigravity.google",
-			"accounts.google.com",
-			"oauth2.googleapis.com",
-			"cloudcode-pa.googleapis.com",
-			"daily-cloudcode-pa.googleapis.com",
+			"antigravity.google", "accounts.google.com", "oauth2.googleapis.com",
+			"cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com",
 		},
-		TargetDomainSuffix: []string{
-			".googleapis.com",
-		},
-		StrictRoute:    strictRoute,
-		DomainFallback: true,
+		TargetDomainSuffix: []string{".googleapis.com"},
+		StrictRoute:        strictRoute,
+		DomainFallback:     true,
 	}
 }
 
-func (m *Manager) AgentTunnelSupported() bool {
-	return runtime.GOOS == "windows" || runtime.GOOS == "linux"
-}
-
-func (m *Manager) AgentTunnelActive() bool {
-	return m.TunnelRunning()
-}
+func (m *Manager) AgentTunnelSupported() bool { return runtime.GOOS == "windows" || runtime.GOOS == "linux" }
+func (m *Manager) AgentTunnelActive() bool    { return m.TunnelRunning() }
 
 func (m *Manager) AgentTunnelPrivilegeHint() string {
 	switch runtime.GOOS {
@@ -115,8 +86,6 @@ func (m *Manager) StopAndWait(ctx context.Context) error {
 			if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
 			}
-			// Leave the durable journal open. The next start will detect it and
-			// recover only resources attributable to the captured transaction.
 			return ctx.Err()
 		case <-ticker.C:
 		}
@@ -137,162 +106,70 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	if err := os.MkdirAll(cfg.Root, 0o755); err != nil {
 		return err
 	}
-
 	dnsIP, dnsName := "1.1.1.1", "cloudflare-dns.com"
 	if strings.EqualFold(cfg.DNSProvider, "google") {
 		dnsIP, dnsName = "8.8.8.8", "dns.google"
 	}
-
 	secureDoH := map[string]any{
-		"type":           "https",
-		"tag":            "secure-doh",
-		"server":         dnsIP,
-		"server_port":    443,
-		"path":           "/dns-query",
+		"type": "https", "tag": "secure-doh", "server": dnsIP, "server_port": 443, "path": "/dns-query",
 		"bind_interface": cfg.VPNInterface,
-		"tls": map[string]any{
-			"enabled":     true,
-			"server_name": dnsName,
-		},
+		"tls": map[string]any{"enabled": true, "server_name": dnsName},
 	}
-	localDNS := map[string]any{
-		"type":      "local",
-		"tag":       "local-dns",
-		"prefer_go": false,
-	}
-
+	localDNS := map[string]any{"type": "local", "tag": "local-dns", "prefer_go": false}
 	dnsRules := []any{
-		map[string]any{
-			"process_name": options.ProcessNames,
-			"action":       "route",
-			"server":       "secure-doh",
-		},
-		map[string]any{
-			"process_path_regex": options.ProcessPathRegex,
-			"action":             "route",
-			"server":             "secure-doh",
-		},
+		map[string]any{"process_name": options.ProcessNames, "action": "route", "server": "secure-doh"},
+		map[string]any{"process_path_regex": options.ProcessPathRegex, "action": "route", "server": "secure-doh"},
 	}
 	if options.DomainFallback {
 		dnsRules = append(dnsRules, map[string]any{
-			"domain":        options.TargetDomains,
-			"domain_suffix": options.TargetDomainSuffix,
-			"action":        "route",
-			"server":        "secure-doh",
+			"domain": options.TargetDomains, "domain_suffix": options.TargetDomainSuffix,
+			"action": "route", "server": "secure-doh",
 		})
 	}
-
 	vpnDirect := map[string]any{
-		"type":           "direct",
-		"tag":            "vpn-direct",
-		"bind_interface": cfg.VPNInterface,
-		"domain_resolver": map[string]any{
-			"server":   "secure-doh",
-			"strategy": "ipv4_only",
-		},
+		"type": "direct", "tag": "vpn-direct", "bind_interface": cfg.VPNInterface,
+		"domain_resolver": map[string]any{"server": "secure-doh", "strategy": "ipv4_only"},
 	}
 	systemDirect := map[string]any{
-		"type": "direct",
-		"tag":  "system-direct",
-		"domain_resolver": map[string]any{
-			"server": "local-dns",
-		},
+		"type": "direct", "tag": "system-direct",
+		"domain_resolver": map[string]any{"server": "local-dns"},
 	}
-
 	tunInbound := map[string]any{
-		"type":           "tun",
-		"tag":            agentTunnelTag,
-		"interface_name": agentTunName,
-		"address":        []string{"172.31.255.1/30", "fdfe:dcba:9876::1/126"},
-		"mtu":            1500,
-		"auto_route":     true,
-		"strict_route":   options.StrictRoute,
-		"dns_mode":       "hijack",
-		"stack":          "system",
+		"type": "tun", "tag": agentTunnelTag, "interface_name": agentTunName,
+		"address": []string{"172.31.255.1/30", "fdfe:dcba:9876::1/126"},
+		"mtu": 1500, "auto_route": true, "strict_route": options.StrictRoute, "dns_mode": "hijack", "stack": "system",
 		"route_exclude_address": []string{
-			"127.0.0.0/8",
-			"10.0.0.0/8",
-			"172.16.0.0/12",
-			"192.168.0.0/16",
-			"169.254.0.0/16",
-			"::1/128",
-			"fe80::/10",
-			"fc00::/7",
+			"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
+			"::1/128", "fe80::/10", "fc00::/7",
 		},
 	}
 	if runtime.GOOS == "linux" {
-		// auto_redirect is deliberately disabled. The real dual-egress netns
-		// test proved that its Linux fallback rule can allow the host default
-		// route to win before process classification. Capture first with
-		// auto_route+strict_route, then return unrelated flows via system-direct.
-		// Pin sing-box's iproute2 namespace so the recovery journal can prove
-		// ownership before mutation and recover without broad route deletion.
 		tunInbound["auto_redirect"] = false
 		tunInbound["iproute2_table_index"] = linuxTunnelRouteTableIndex
 		tunInbound["iproute2_rule_index"] = linuxTunnelRuleStart
 	}
-
 	routeRules := []any{
-		map[string]any{
-			"inbound":  []string{"local-mixed"},
-			"action":   "route",
-			"outbound": "vpn-direct",
-		},
-		map[string]any{
-			"inbound":      []string{agentTunnelTag},
-			"process_name": options.ProcessNames,
-			"action":       "route",
-			"outbound":     "vpn-direct",
-		},
-		map[string]any{
-			"inbound":            []string{agentTunnelTag},
-			"process_path_regex": options.ProcessPathRegex,
-			"action":             "route",
-			"outbound":           "vpn-direct",
-		},
-		map[string]any{
-			"inbound": []string{agentTunnelTag},
-			"action":  "sniff",
-		},
+		map[string]any{"inbound": []string{"local-mixed"}, "action": "route", "outbound": "vpn-direct"},
+		map[string]any{"inbound": []string{agentTunnelTag}, "process_name": options.ProcessNames, "action": "route", "outbound": "vpn-direct"},
+		map[string]any{"inbound": []string{agentTunnelTag}, "process_path_regex": options.ProcessPathRegex, "action": "route", "outbound": "vpn-direct"},
+		map[string]any{"inbound": []string{agentTunnelTag}, "action": "sniff"},
 	}
 	if options.DomainFallback {
 		routeRules = append(routeRules, map[string]any{
-			"inbound":       []string{agentTunnelTag},
-			"domain":        options.TargetDomains,
-			"domain_suffix": options.TargetDomainSuffix,
-			"action":        "route",
-			"outbound":      "vpn-direct",
+			"inbound": []string{agentTunnelTag}, "domain": options.TargetDomains,
+			"domain_suffix": options.TargetDomainSuffix, "action": "route", "outbound": "vpn-direct",
 		})
 	}
-
 	doc := map[string]any{
-		"log": map[string]any{
-			"level":     "info",
-			"timestamp": true,
-		},
-		"dns": map[string]any{
-			"servers":  []any{secureDoH, localDNS},
-			"rules":    dnsRules,
-			"final":    "local-dns",
-			"strategy": "prefer_ipv4",
-		},
+		"log": map[string]any{"level": "info", "timestamp": true},
+		"dns": map[string]any{"servers": []any{secureDoH, localDNS}, "rules": dnsRules, "final": "local-dns", "strategy": "prefer_ipv4"},
 		"inbounds": []any{
-			map[string]any{
-				"type":        "mixed",
-				"tag":         "local-mixed",
-				"listen":      cfg.Host,
-				"listen_port": cfg.Port,
-			},
+			map[string]any{"type": "mixed", "tag": "local-mixed", "listen": cfg.Host, "listen_port": cfg.Port},
 			tunInbound,
 		},
 		"outbounds": []any{vpnDirect, systemDirect},
-		"route": map[string]any{
-			"rules":                 routeRules,
-			"final":                 "system-direct",
-			"auto_detect_interface": true,
-		},
+		"route": map[string]any{"rules": routeRules, "final": "system-direct", "auto_detect_interface": true},
 	}
-
 	b, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return err
@@ -300,16 +177,10 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	return atomicfile.Write(path, append(b, '\n'), 0o600)
 }
 
-// StartAgentTunnel does not trust a matching binary merely because it exists.
-// The privileged TUN data plane must come from a release whose archive digest
-// was verified and whose installed binary still matches persisted provenance.
-// The network mutation is journaled before sing-box starts so even a crash
-// between route application and readiness can be recovered conservatively.
 func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelOptions) error {
 	if !m.AgentTunnelSupported() {
 		return fmt.Errorf("Agent Tunnel is unsupported on %s", runtime.GOOS)
 	}
-
 	binary, err := m.InstallVerified(ctx)
 	if err != nil {
 		return fmt.Errorf("ensure verified Agent Tunnel sing-box: %w", err)
@@ -317,7 +188,6 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 	if err := validateAgentTunnelHost(binary); err != nil {
 		return err
 	}
-
 	options := DefaultAgentTunnelOptions()
 	if len(provided) > 0 {
 		options = provided[0]
@@ -325,10 +195,24 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 	if runtime.GOOS == "linux" {
 		options.StrictRoute = true
 	}
-
 	if m.ManagedRunning() {
 		return fmt.Errorf("sing-box already started by this process in %s mode; stop it before starting Agent Tunnel", m.Mode())
 	}
+
+	preflight := m.AgentTunnelPreflight(ctx)
+	for _, finding := range preflight.Findings {
+		level := "info"
+		if finding.Severity == PreflightWarning {
+			level = "warn"
+		} else if finding.Severity == PreflightBlocker {
+			level = "error"
+		}
+		m.log(level, "Agent Tunnel preflight ["+finding.Code+"]: "+finding.Detail)
+	}
+	if !preflight.OK {
+		return fmt.Errorf("Agent Tunnel preflight blocked startup: %s", preflight.BlockerSummary())
+	}
+
 	cfg := m.Config()
 	vpn := strings.TrimSpace(cfg.VPNInterface)
 	if vpn == "" {
@@ -344,11 +228,9 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 	if iface.Flags&net.FlagUp == 0 {
 		return fmt.Errorf("selected VPN interface %q is down", vpn)
 	}
-
 	if err := m.beginTunnelTransaction(ctx); err != nil {
 		return err
 	}
-
 	m.mu.Lock()
 	if m.cmd != nil && m.cmd.Process != nil {
 		mode := m.mode
@@ -368,7 +250,6 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 		m.abortPreparedTunnelTransaction("sing-box start failed: " + err.Error())
 		return err
 	}
-
 	if err := m.waitAgentTunnelReady(ctx, 8*time.Second); err != nil {
 		return m.rollbackFailedAgentTunnelStart(err)
 	}
@@ -385,7 +266,6 @@ func (m *Manager) waitAgentTunnelReady(ctx context.Context, maxWait time.Duratio
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	last := "waiting for managed listener and TUN"
-
 	for {
 		if !m.ManagedRunning() {
 			return errors.New("sing-box exited before Agent Tunnel readiness was established")
@@ -399,7 +279,6 @@ func (m *Manager) waitAgentTunnelReady(ctx context.Context, maxWait time.Duratio
 			return nil
 		}
 		last = fmt.Sprintf("tun_up=%v listener_owned=%v (%s)", tunOK, listenerOK, detail)
-
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("Agent Tunnel readiness cancelled: %w; last=%s", ctx.Err(), last)
