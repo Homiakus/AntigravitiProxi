@@ -66,6 +66,9 @@
 - [x] sing-box 1.14 connection tracker доступен через отдельный authenticated loopback API; runtime evidence содержит source endpoint, process path, destination и выбранный outbound.
 - [x] Deterministic external-egress fixture доказывает реальное различие `vpn-direct -> 10.250.0.2` и `system-direct -> 10.251.0.2` глазами одного удалённого observer, а не только по конфигурации.
 - [x] Linux PID-level runtime proof соединяет конкретный PID → `/proc` socket inode → sing-box source endpoint → `vpn-direct` → внешний VPN-source address.
+- [x] Native Windows CI открывает реальный TCP socket и доказывает exact local endpoint → `netstat -ano` → PID создающего процесса; parser fixtures отдельно покрывают IPv4/IPv6, candidate filtering и ambiguous ownership.
+- [x] Composed assurance опубликован read-only через `GET /api/attestation`; Web UI показывает `idle/partial/verified/degraded`, PID-route evidence, external egress и возраст evidence.
+- [x] External-egress evidence имеет bounded in-memory cache: success TTL 15 s, failure TTL 3 s, key = managed sing-box PID + VPN interface; API явно возвращает `egress_cached` и `egress_fresh_until`.
 
 ## P0 — уже реализовано
 
@@ -131,8 +134,8 @@
 - [x] Authenticated sing-box runtime connection evidence records `source/process/outbound/destination/inbound/network`. **[R-002, R-015]**
 - [x] External observer attestation proves the `vpn-direct` path has a real externally visible egress consequence and compares it with `system-direct`; observer failure remains incomplete evidence, not a false routing diagnosis. **[R-015, R-019]**
 - [x] Linux: correlate a concrete live candidate PID with `/proc` socket ownership, sing-box source endpoint and `vpn-direct`; privileged `netns` CI proves the chain end to end. **[R-002, R-015]**
-- [x] Windows: implement exact source-endpoint → `netstat -ano` → candidate PID correlation and cross-build it. **[R-002, R-015]**
-- [ ] Add real Windows runtime proof for PID/socket/outbound correlation; then require every active discovered production helper PID to have exact route evidence before a strong `verified` state. **[R-002, R-015]**
+- [x] Windows: implement exact source-endpoint → `netstat -ano` → candidate PID correlation, cover it by parser fixtures, and prove live socket → PID attribution on a native Windows runner. **[R-002, R-015]**
+- [ ] Add full Windows Agent Tunnel runtime proof for PID/socket → sing-box outbound → controlled external egress; only then claim Linux-equivalent end-to-end assurance on Windows. **[R-002, R-015]**
 - [x] Verify mixed listener belongs to the managed sing-box PID before trusting health/readiness. **[R-022]**
 - [ ] Add ownership token/fingerprint before killing a previously orphaned helper, not only an in-memory `cmd.Process` pointer. **[R-010, R-022]**
 - [x] Route conflict preflight for reserved routing namespace, custom policy rules, concurrent VPNs and Docker/Podman/libvirt/VirtualBox/VMware-like interfaces; ambiguous high-risk ownership blocks mutation. **[R-013, R-025]**
@@ -143,7 +146,8 @@
 
 - [x] Evidence-based health snapshot with explicit `idle / healthy / degraded`; dimensions include `managed_process`, `mixed_listener_owned`, `tun`, `vpn_interface`, `network_journal`. **[R-014, R-022, R-026]**
 - [x] Backend assurance composition implemented for process-tree + sing-box route + PID/socket ownership + external egress with `idle / partial / verified / degraded` semantics. **[R-002, R-014, R-015]**
-- [ ] Expose/cache composed assurance through the control-plane API/UI without probing public observers on every status refresh; evidence needs timestamp/expiry semantics. **[R-014, R-015, R-019]**
+- [x] Expose/cache composed assurance through read-only `GET /api/attestation` and Web UI; external observer work is bounded by 15 s success / 3 s failure TTL, and callers receive explicit cache/freshness metadata. **[R-014, R-015, R-019]**
+- [ ] Add explicit lifecycle invalidation hooks for assurance cache on data-plane start/stop/reconfigure in addition to PID/VPN keying and short TTL. **[R-014, R-015]**
 - [ ] Extend lifecycle state machine to explicit transient states: `installing → starting → stopping → recovering`, with transition invariants and timestamps. **[R-001, R-014]**
 - [ ] Add independent health dimensions: `route`, `dns_v4`, `dns_v6`, `egress`, `agent_process`, `backend`. **[R-005, R-011, R-014, R-015]**
 - [ ] Operation IDs and cancellation for long-running web actions. **[R-001, R-014]**
@@ -162,11 +166,12 @@
 - [ ] Convert remaining direct writes (SAFE proxy config, Antigravity settings/hosts metadata where appropriate) to atomic transactions and add interruption fault injection. **[R-024]**
 - [ ] Structured JSON diagnostic bundle.
 - [ ] Central redaction for bearer/OAuth tokens, cookies, email-like identifiers and user paths; optional IP anonymization before any egress evidence can enter a support bundle. **[R-019]**
+- [ ] Verify/harden Windows DACL/security descriptor for `sing-box-api-secret` and other sensitive runtime files using native Windows security evidence; POSIX `FileMode` bits must never be treated as Windows ACL proof. **[R-019, R-024]**
 - [ ] Emergency hosts override ownership metadata, creation time/TTL, startup stale warning and safe auto-removal. **[R-009]**
 - [x] Generated Agent Tunnel config validated against pinned real sing-box in CI. **[R-007]**
 - [ ] General sing-box schema/behavior compatibility contract for future upgrades. **[R-007]**
 - [x] Privileged Agent Tunnel install is fail-closed on missing/invalid official SHA-256; verified archive → installed binary hash → persisted provenance; binary tampering invalidates reuse. **[R-007, R-023]**
-- [ ] Protect `main` and require CI test, Linux TUN runtime, FMEA/riskcheck and platform build checks at repository ruleset level. **[R-017]**
+- [ ] Protect `main` and require CI test, Linux TUN runtime, Windows native unit/runtime evidence, FMEA/riskcheck and platform build checks at repository ruleset level. **[R-017]**
 - [ ] Windows installer/MSIX or MSI.
 - [ ] Linux `.deb` and desktop entry.
 - [ ] Code signing pipeline. **[R-007]**
@@ -193,7 +198,8 @@
 - [ ] Connection topology visualization with actual/expected egress.
 - [ ] Explicit transport ladder: `SAFE MODE → AGENT TUNNEL → ELIGIBILITY DIAGNOSIS`.
 - [ ] One-click diagnostic bundle combining sing-box logs + Agent Doctor + route/TUN/journal state.
-- [ ] Surface `/api/process-tree`, unknown helpers, PID-route/public-egress assurance, health dimensions and open recovery journal in Advanced UI.
+- [x] Surface composed runtime assurance summary in main Web UI: state, PID-route ratio, external egress, cache/freshness age and full evidence JSON on demand.
+- [ ] Expand Advanced UI with raw `/api/process-tree`, unknown helpers, per-connection PID ownership, all health dimensions and open recovery journal.
 - [ ] PWA notifications for proxy/tunnel degradation.
 - [ ] Offline help pages.
 - [ ] RU/EN localization.
@@ -205,7 +211,7 @@
 
 - [ ] Integration tests with mock HTTP CONNECT/SOCKS server.
 - [ ] TUN config golden tests for Windows/Linux.
-- [ ] Windows runner integration test for route/process matching where runner permissions allow it. **[R-002, R-015]**
+- [x] Native Windows runner unit/runtime job executes Windows-specific proxy/antigravity/app tests and `go vet`; live socket fixture proves exact local endpoint → `netstat -ano` → current PID. **[R-002, R-015]**
 - [x] Linux network namespace runtime fixture for real TUN startup/health/cleanup.
 - [x] Linux PID/path-aware dual-egress runtime test: Antigravity/language_server/bundled helper → `vpn-direct`, ordinary client → `system-direct`. **[R-002, R-003, R-015]**
 - [x] Deterministic external-egress runtime test: the same remote observer sees `vpn-direct` and `system-direct` from distinct expected source addresses. **[R-015]**
@@ -220,7 +226,8 @@
 - [x] Concurrent-network-manager negative recovery test: add unrelated route table/rule while tunnel is active, crash, recover, prove unrelated state survives. **[R-025]**
 - [x] Recovery-journal corruption/`previous-good` fixtures prove corrupted primary evidence cannot trigger broad cleanup; explicit old-schema migration matrix remains P1. **[R-026]**
 - [ ] Windows forced-kill recovery fixture proving exact interface-LUID/route cleanup and preservation of unrelated routes. **[R-027]**
-- [ ] Windows live PID/socket/outbound runtime fixture matching the Linux assurance chain. **[R-002, R-015]**
+- [ ] Full Windows Agent Tunnel live PID/socket/outbound/external-egress fixture matching the Linux assurance chain. **[R-002, R-015]**
+- [ ] Windows security-descriptor fixture proving sensitive runtime files are not accessible to unintended principals. **[R-019, R-024]**
 - [ ] Agent Doctor fixture matrix for geo/account, auth, quota, MCP/hooks and backend 5xx. **[R-011]**
 - [ ] Diagnostic secret/redaction fixture corpus + fuzz tests. **[R-019]**
 - [ ] Atomic-write interruption/fault-injection tests beyond normal old/new completeness tests. **[R-024]**
