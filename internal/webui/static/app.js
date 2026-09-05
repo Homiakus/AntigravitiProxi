@@ -51,12 +51,20 @@ async function refresh(){
   $('#dns-provider').value=state.settings.dns_provider||'cloudflare';
   $('#proxy-port').value=state.settings.proxy_port||7890;
   $('#auto-open').checked=!!state.settings.auto_open;
+  const fallback=$('#tunnel-domain-fallback');
+  if(fallback) fallback.checked=!!state.settings.tunnel_domain_fallback;
 }
 
 function assuranceColor(v){
   if(v==='verified') return 'var(--good)';
   if(v==='degraded') return 'var(--bad)';
   if(v==='partial') return 'var(--warn)';
+  return 'var(--muted)';
+}
+
+function isolationColor(v){
+  if(v==='strict') return 'var(--good)';
+  if(v==='isolation-relaxed') return 'var(--warn)';
   return 'var(--muted)';
 }
 
@@ -67,6 +75,15 @@ function renderAssurance(v){
   const level=String(v?.state||'idle').toLowerCase();
   stateEl.textContent=level.toUpperCase();
   stateEl.style.color=assuranceColor(level);
+
+  const isolation=String(v?.isolation||'inactive').toLowerCase();
+  const isolationEl=$('#assurance-isolation');
+  if(isolationEl){
+    isolationEl.textContent=isolation.toUpperCase();
+    isolationEl.style.color=isolationColor(isolation);
+  }
+  const isolationDetail=$('#assurance-isolation-detail');
+  if(isolationDetail) isolationDetail.textContent=v?.isolation_detail||'';
 
   const active=v?.pid_route?.active_candidate_pids?.length||0;
   const vpn=v?.pid_route?.vpn_direct_pids?.length||0;
@@ -135,7 +152,8 @@ async function action(name){
         vpn_interface:$('#vpn-interface').value,
         dns_provider:$('#dns-provider').value,
         proxy_port:Number($('#proxy-port').value),
-        auto_open:$('#auto-open').checked
+        auto_open:$('#auto-open').checked,
+        tunnel_domain_fallback:!!$('#tunnel-domain-fallback')?.checked
       }});
     }else if(name==='diagnostics'){
       res=await api('/api/diagnostics');
