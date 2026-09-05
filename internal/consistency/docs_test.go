@@ -116,7 +116,8 @@ func TestCanonicalDocsMatchCurrentRoutingAndPrivilegeModel(t *testing.T) {
 	fmea := readRepoFile(t, root, "docs/ARCHITECTURE_FMEA.md")
 	requireAll(t, "docs/ARCHITECTURE_FMEA.md", fmea,
 		"auto_redirect=false",
-		"fixed-function PolicyKit helper",
+		"fixed-function internal helper",
+		"PolicyKit",
 		"R-023 закрыт",
 		"R-008 закрыт",
 		"R-012 остаётся mitigating",
