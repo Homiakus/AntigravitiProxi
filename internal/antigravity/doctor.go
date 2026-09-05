@@ -71,7 +71,11 @@ var (
 )
 
 func AgentDoctor(ctx context.Context) AgentDoctorReport {
-	report := AgentDoctorReport{LikelyCause: "unknown", Summary: "No specific root cause found yet."}
+	report := AgentDoctorReport{
+		LikelyCause: "unknown",
+		Summary:     "No specific root cause found yet.",
+		Findings:    []AgentFinding{},
+	}
 	roots := agentLogRoots()
 	for _, r := range roots {
 		if st, err := os.Stat(r); err == nil && st.IsDir() {
