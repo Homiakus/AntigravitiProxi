@@ -32,6 +32,11 @@ func capturePlatformNetworkSnapshot(ctx context.Context) (NetworkSnapshot, error
 	return s, nil
 }
 
+// Windows does not yet claim a route-table/rule namespace. Recovery remains
+// fail-closed until route objects can be tied to a stable interface LUID and
+// compartment, so there is no safe reserved-namespace collision to preflight.
+func preflightPlatformNetworkOwnership(NetworkSnapshot) error { return nil }
+
 func recoverPlatformOwnedNetworkState(ctx context.Context, j TunnelStateJournal) ([]string, error) {
 	_ = ctx
 	var actions []string
