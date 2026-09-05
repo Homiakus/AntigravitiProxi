@@ -30,8 +30,8 @@
 | R-011 | P2 backend/account-vs-transport health classification |
 | R-012 | P1 capability-preserving Linux sing-box update flow |
 | R-013 | P1 route conflict preflight; P4 Docker/VM/distro runtime matrix |
-| R-014 | P1 multidimensional health state machine |
-| R-015 | P1 production selected-egress attestation; CI dual-egress evidence |
+| R-014 | P1 multidimensional health + assurance state machine |
+| R-015 | P1 PID/socket/outbound/public-egress attestation; CI dual-egress evidence |
 | R-016 | P1 forced-shutdown journal recovery |
 | R-017 | P1 protect `main` with required CI checks |
 | R-018 | P4 Linux ARM64 + Debian/Fedora runtime coverage |
@@ -57,9 +57,15 @@
 - [x] Persisted control-plane/proxy endpoints fail-closed к loopback-only.
 - [x] Settings, Agent Tunnel config, dependency provenance и network-state journal используют atomic temp → fsync/write-through → atomic replace + `previous-good`.
 - [x] До любого Linux Agent Tunnel mutation сохраняется durable network baseline: IPv4/IPv6 routes, policy rules, DNS fingerprint и nftables fingerprint.
-- [x] После readiness сохраняется active snapshot и вычисляется conservative ownership delta: только полностью новые route tables и rule priorities, отсутствовавшие в baseline.
+- [x] Linux Agent Tunnel закреплён за выделенным ownership namespace: route table `20229` и rule-priority range `19000..19031`; collision preflight выполняется до mutation.
+- [x] После readiness сохраняется active snapshot и вычисляется conservative ownership delta; reserved namespace дополняет, а не заменяет before/after evidence.
+- [x] SIGKILL/crash runtime fixture доказывает восстановление owned TUN/table/rule и сохранение одновременно добавленного чужого route/rule state.
+- [x] Повреждённый recovery journal восстанавливается только из валидного `previous-good`; неоднозначное состояние fail-closed и не запускает broad cleanup.
 - [x] Stale recovery удаляет только доказуемо принадлежащие предыдущей операции TUN/table/rule ресурсы; DNS/firewall изменения остаются evidence-only и никогда не откатываются автоматически без ownership proof.
 - [x] Open/invalid recovery journal является отдельным health evidence и блокирует `healthy` вне активной подтверждённой tunnel-транзакции.
+- [x] sing-box 1.14 connection tracker доступен через отдельный authenticated loopback API; runtime evidence содержит source endpoint, process path, destination и выбранный outbound.
+- [x] Deterministic external-egress fixture доказывает реальное различие `vpn-direct -> 10.250.0.2` и `system-direct -> 10.251.0.2` глазами одного удалённого observer, а не только по конфигурации.
+- [x] Linux PID-level runtime proof соединяет конкретный PID → `/proc` socket inode → sing-box source endpoint → `vpn-direct` → внешний VPN-source address.
 
 ## P0 — уже реализовано
 
@@ -109,11 +115,12 @@
 - [x] Linux settings/executable discovery uses invoking desktop user rather than `/root` when elevated. **[R-006]**
 - [x] Automatic Agent Tunnel startup transaction: managed process → owned listener + TUN + VPN readiness; failure invokes stop/wait rollback. **[R-001, R-014, R-022]**
 - [x] Durable pre-change route/rule/DNS/nftables fingerprint, active snapshot, ownership delta and `network-state-last-clean.json` recovery evidence. **[R-001, R-010, R-013, R-016, R-026]**
-- [x] Next-start stale recovery for Linux `antigravity-tun`, wholly-new route tables and new rule priorities; live previous PID makes recovery fail closed. **[R-010, R-016, R-025]**
+- [x] Next-start stale recovery for Linux `antigravity-tun`, reserved route table/rule range and derived owned deltas; live previous PID makes recovery fail closed. **[R-010, R-016, R-025]**
 - [x] SAFE proxy startup also requires managed-listener ownership and rolls back on readiness timeout. **[R-014, R-022]**
 - [ ] Add startup/forced-kill fault injection for every journal phase (`prepared`, partially applied, `active`, `recovering`). **[R-001, R-010, R-016, R-026]**
-- [ ] Reserve explicit Linux route-table/rule ownership identifiers and preflight collisions so recovery does not rely only on before/after differencing. **[R-013, R-025]**
-- [ ] Journal corruption/old-schema recovery from `previous-good` plus deterministic operator guidance. **[R-026]**
+- [x] Reserve explicit Linux route-table/rule ownership identifiers and preflight collisions so recovery does not rely only on before/after differencing. **[R-013, R-025]**
+- [x] Recover a corrupt current journal only from validated `previous-good`; quarantine invalid primary evidence and fail closed when recovery evidence is insufficient. **[R-026]**
+- [ ] Complete explicit old-schema migration policy and fixture matrix beyond fail-closed schema rejection. **[R-026]**
 - [ ] Windows interface LUID/route-compartment ownership and exact stale-route recovery; broad route deletion remains prohibited until then. **[R-027]**
 - [ ] Managed sing-box lifecycle recovery after reboot / externally orphaned process with ownership token before any kill. **[R-010, R-022]**
 - [ ] Detect Linux capability loss after managed sing-box replacement and repair through minimal privileged helper. **[R-012]**
@@ -121,15 +128,22 @@
 ### Egress and process isolation
 
 - [x] Live Antigravity process-tree discovery on Linux/Windows with unknown-descendant surfacing. **[R-002]**
-- [ ] Correlate every discovered production Antigravity/helper PID with selected interface/public egress evidence; mismatch or unknown helper must block `healthy`. **[R-002, R-015]**
+- [x] Authenticated sing-box runtime connection evidence records `source/process/outbound/destination/inbound/network`. **[R-002, R-015]**
+- [x] External observer attestation proves the `vpn-direct` path has a real externally visible egress consequence and compares it with `system-direct`; observer failure remains incomplete evidence, not a false routing diagnosis. **[R-015, R-019]**
+- [x] Linux: correlate a concrete live candidate PID with `/proc` socket ownership, sing-box source endpoint and `vpn-direct`; privileged `netns` CI proves the chain end to end. **[R-002, R-015]**
+- [x] Windows: implement exact source-endpoint → `netstat -ano` → candidate PID correlation and cross-build it. **[R-002, R-015]**
+- [ ] Add real Windows runtime proof for PID/socket/outbound correlation; then require every active discovered production helper PID to have exact route evidence before a strong `verified` state. **[R-002, R-015]**
 - [x] Verify mixed listener belongs to the managed sing-box PID before trusting health/readiness. **[R-022]**
 - [ ] Add ownership token/fingerprint before killing a previously orphaned helper, not only an in-memory `cmd.Process` pointer. **[R-010, R-022]**
-- [ ] Route conflict preflight for Docker/Podman, libvirt/VM, NetworkManager/systemd-networkd, concurrent VPNs and custom policy-routing tables. **[R-013, R-025]**
+- [x] Route conflict preflight for reserved routing namespace, custom policy rules, concurrent VPNs and Docker/Podman/libvirt/VirtualBox/VMware-like interfaces; ambiguous high-risk ownership blocks mutation. **[R-013, R-025]**
+- [ ] Expand route-conflict runtime matrix across NetworkManager/systemd-networkd, Docker/Podman and VM stacks. **[R-013, R-025]**
 - [ ] Make broad domain fallback visibly `degraded/isolation-relaxed` and prepare migration to process-learned policy. **[R-003]**
 
 ### Health/orchestration contracts
 
 - [x] Evidence-based health snapshot with explicit `idle / healthy / degraded`; dimensions include `managed_process`, `mixed_listener_owned`, `tun`, `vpn_interface`, `network_journal`. **[R-014, R-022, R-026]**
+- [x] Backend assurance composition implemented for process-tree + sing-box route + PID/socket ownership + external egress with `idle / partial / verified / degraded` semantics. **[R-002, R-014, R-015]**
+- [ ] Expose/cache composed assurance through the control-plane API/UI without probing public observers on every status refresh; evidence needs timestamp/expiry semantics. **[R-014, R-015, R-019]**
 - [ ] Extend lifecycle state machine to explicit transient states: `installing → starting → stopping → recovering`, with transition invariants and timestamps. **[R-001, R-014]**
 - [ ] Add independent health dimensions: `route`, `dns_v4`, `dns_v6`, `egress`, `agent_process`, `backend`. **[R-005, R-011, R-014, R-015]**
 - [ ] Operation IDs and cancellation for long-running web actions. **[R-001, R-014]**
@@ -147,7 +161,7 @@
 - [x] Verified dependency provenance and network-state journal use the atomic-write helper. **[R-007, R-023, R-024, R-026]**
 - [ ] Convert remaining direct writes (SAFE proxy config, Antigravity settings/hosts metadata where appropriate) to atomic transactions and add interruption fault injection. **[R-024]**
 - [ ] Structured JSON diagnostic bundle.
-- [ ] Central redaction for bearer/OAuth tokens, cookies, email-like identifiers and user paths; optional IP anonymization. **[R-019]**
+- [ ] Central redaction for bearer/OAuth tokens, cookies, email-like identifiers and user paths; optional IP anonymization before any egress evidence can enter a support bundle. **[R-019]**
 - [ ] Emergency hosts override ownership metadata, creation time/TTL, startup stale warning and safe auto-removal. **[R-009]**
 - [x] Generated Agent Tunnel config validated against pinned real sing-box in CI. **[R-007]**
 - [ ] General sing-box schema/behavior compatibility contract for future upgrades. **[R-007]**
@@ -163,7 +177,7 @@
 - [ ] Auto-select fastest healthy egress only after policy/eligibility checks.
 - [ ] Per-endpoint policy: OAuth / Cloud Code / model generation / Antigravity site.
 - [ ] Dynamically learn Antigravity backend hostnames from language-server command line, SNI and logs instead of relying only on a static set. **[R-020]**
-- [ ] Dynamically learn helper PID/path topology and reconcile with allowlisted policy; current process-tree inventory supplies the discovery substrate. **[R-002, R-003, R-020]**
+- [ ] Dynamically learn helper PID/path topology and reconcile with allowlisted policy; current process-tree + PID/socket attestation supply the discovery/verification substrate. **[R-002, R-003, R-020]**
 - [ ] Replace broad `*.googleapis.com` fallback with narrow learned process+endpoint routing wherever process attribution is available. **[R-003]**
 - [ ] Failover Cloudflare DoH ↔ Google DoH with independent health.
 - [ ] DNS poisoning confidence score instead of boolean mismatch.
@@ -179,7 +193,7 @@
 - [ ] Connection topology visualization with actual/expected egress.
 - [ ] Explicit transport ladder: `SAFE MODE → AGENT TUNNEL → ELIGIBILITY DIAGNOSIS`.
 - [ ] One-click diagnostic bundle combining sing-box logs + Agent Doctor + route/TUN/journal state.
-- [ ] Surface `/api/process-tree`, unknown helpers, health dimensions and open recovery journal in Advanced UI.
+- [ ] Surface `/api/process-tree`, unknown helpers, PID-route/public-egress assurance, health dimensions and open recovery journal in Advanced UI.
 - [ ] PWA notifications for proxy/tunnel degradation.
 - [ ] Offline help pages.
 - [ ] RU/EN localization.
@@ -194,6 +208,8 @@
 - [ ] Windows runner integration test for route/process matching where runner permissions allow it. **[R-002, R-015]**
 - [x] Linux network namespace runtime fixture for real TUN startup/health/cleanup.
 - [x] Linux PID/path-aware dual-egress runtime test: Antigravity/language_server/bundled helper → `vpn-direct`, ordinary client → `system-direct`. **[R-002, R-003, R-015]**
+- [x] Deterministic external-egress runtime test: the same remote observer sees `vpn-direct` and `system-direct` from distinct expected source addresses. **[R-015]**
+- [x] Linux live PID/socket route-attestation runtime test: candidate PID → socket inode/source endpoint → sing-box connection → `vpn-direct` → expected external VPN source. **[R-002, R-015]**
 - [ ] Negative test: unrelated Google client must retain `system-direct` when domain fallback is enabled/disabled according to isolation mode. **[R-003]**
 - [ ] Linux ARM64 privileged TUN runtime runner; current ARM64 coverage is build-only. **[R-018]**
 - [ ] Distro runtime matrix: Ubuntu/Debian/Fedora family; systemd-resolved, nftables, NetworkManager. **[R-013, R-018]**
@@ -201,9 +217,10 @@
 - [ ] Dual-stack A/AAAA + TCP/UDP/QUIC egress tests. **[R-005]**
 - [ ] Port-collision test with foreign listener on 7890; readiness must prove foreign PID cannot become healthy. **[R-022]**
 - [ ] Fault-injection tests across each TUN startup phase and forced-shutdown recovery. **[R-001, R-010, R-016]**
-- [ ] Concurrent-network-manager negative recovery test: add unrelated route table/rule while tunnel is active, crash, recover, prove unrelated state survives. **[R-025]**
-- [ ] Recovery-journal corruption/truncation/old-schema fixture matrix; no case may trigger broad cleanup. **[R-026]**
+- [x] Concurrent-network-manager negative recovery test: add unrelated route table/rule while tunnel is active, crash, recover, prove unrelated state survives. **[R-025]**
+- [x] Recovery-journal corruption/`previous-good` fixtures prove corrupted primary evidence cannot trigger broad cleanup; explicit old-schema migration matrix remains P1. **[R-026]**
 - [ ] Windows forced-kill recovery fixture proving exact interface-LUID/route cleanup and preservation of unrelated routes. **[R-027]**
+- [ ] Windows live PID/socket/outbound runtime fixture matching the Linux assurance chain. **[R-002, R-015]**
 - [ ] Agent Doctor fixture matrix for geo/account, auth, quota, MCP/hooks and backend 5xx. **[R-011]**
 - [ ] Diagnostic secret/redaction fixture corpus + fuzz tests. **[R-019]**
 - [ ] Atomic-write interruption/fault-injection tests beyond normal old/new completeness tests. **[R-024]**
