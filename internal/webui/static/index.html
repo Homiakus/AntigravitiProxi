@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0f172a">
+  <meta name="theme-color" content="#0b1220">
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="stylesheet" href="/styles.css">
   <title>AntigravitiProxi</title>
@@ -12,17 +12,17 @@
   <div class="shell">
     <header class="topbar">
       <div>
-        <div class="eyebrow">LOCAL CONTROL PLANE</div>
+        <div class="eyebrow">ANTIGRAVITY NETWORK CONTROL PLANE</div>
         <h1>AntigravitiProxi</h1>
-        <p>Двухуровневый транспорт для Antigravity IDE: SAFE MODE и process-aware Agent Tunnel.</p>
+        <p>Безопасный двухуровневый транспорт: сначала SAFE MODE, при необходимости — автоматически подготовленный process-aware Agent Tunnel.</p>
       </div>
-      <div class="live"><span id="live-dot" class="dot"></span><span id="live-text">подключение…</span></div>
+      <div class="live" aria-live="polite"><span id="live-dot" class="dot"></span><span id="live-text">подключение…</span></div>
     </header>
 
     <main>
       <section class="hero-grid">
         <article class="panel status-panel">
-          <div class="panel-title"><span>Состояние</span><button class="ghost" data-action="refresh">Обновить</button></div>
+          <div class="panel-title"><span>Система</span><button class="ghost" data-action="refresh">Обновить</button></div>
           <div class="status-grid">
             <div class="metric"><span>Local proxy</span><strong id="proxy-state">—</strong></div>
             <div class="metric"><span>Agent Tunnel</span><strong id="tunnel-state">—</strong></div>
@@ -33,36 +33,73 @@
         </article>
 
         <article class="panel safe-panel">
-          <div class="badge">Уровень 1</div>
+          <div class="badge">Уровень 1 · безопасный старт</div>
           <h2>SAFE MODE</h2>
-          <p>Лёгкий process-only proxy. Сначала используйте его: WinINET/WinHTTP и системные маршруты не меняются, Fusion 360 не затрагивается.</p>
+          <p>Process-only proxy без изменения WinINET/WinHTTP и системного proxy. Подходит как первый режим и не вмешивается в сеть других приложений.</p>
           <button class="primary big" data-action="safe">Запустить SAFE MODE</button>
         </article>
       </section>
 
-      <section class="panel tunnel-panel">
+      <section class="panel tunnel-panel" id="agent-tunnel-panel">
         <div class="panel-title">
-          <span>AGENT TUNNEL · уровень 2</span>
-          <span class="badge tunnel-badge">Agent transport</span>
+          <div>
+            <div class="section-kicker">Уровень 2</div>
+            <span>AGENT TUNNEL</span>
+          </div>
+          <span class="badge tunnel-badge">Transparent transport</span>
         </div>
-        <p class="tunnel-copy">Используйте, если регистрация/OAuth проходят, но агент выдаёт <span class="mono">Agent execution terminated due to error</span>. Режим поднимает sing-box TUN, перехватывает transport/DNS и направляет процессы Antigravity/language_server через выбранный VPN. Остальные приложения по строгой process-policy идут через <span class="mono">system-direct</span>; включённый domain fallback явно помечается как ослабление изоляции.</p>
-        <div class="tunnel-flow mono"><span>Antigravity</span><b>→</b><span>TUN</span><b>→</b><span>process match</span><b>→</b><span>DoH</span><b>→</b><span>VPN</span><b>→</b><span>Google</span></div>
-        <div class="button-row">
-          <button class="primary big" data-action="tunnel/launch">Agent Tunnel + запустить IDE</button>
-          <button data-action="tunnel/start">Только поднять Tunnel</button>
-          <button class="danger-soft" data-action="tunnel/stop">Остановить Tunnel</button>
+
+        <p class="tunnel-copy">Для случая, когда OAuth/регистрация работают, а агент завершается с <span class="mono">Agent execution terminated due to error</span>. На Linux подготовка теперь выполняется автоматически: приложение проверит TUN, при необходимости загрузит модуль, установит capability tooling и через системный PolicyKit запросит только узкие права для managed sing-box.</p>
+
+        <div class="setup-card">
+          <div class="setup-head">
+            <div>
+              <strong>Подготовка одним действием</strong>
+              <span>Пароль не читается и не хранится приложением — авторизацию выполняет ОС.</span>
+            </div>
+            <span id="setup-overall" class="setup-overall">ПРОВЕРКА…</span>
+          </div>
+          <div class="setup-steps">
+            <div class="setup-step" id="setup-singbox"><span class="setup-dot"></span><div><strong>sing-box</strong><small>verified managed binary</small></div><b>—</b></div>
+            <div class="setup-step" id="setup-vpn"><span class="setup-dot"></span><div><strong>VPN</strong><small>явный upstream interface</small></div><b>—</b></div>
+            <div class="setup-step" id="setup-privileges"><span class="setup-dot"></span><div><strong>Права Linux</strong><small>TUN + process attribution</small></div><b>—</b></div>
+            <div class="setup-step" id="setup-runtime"><span class="setup-dot"></span><div><strong>Runtime</strong><small>TUN / listener / VPN evidence</small></div><b>—</b></div>
+          </div>
+          <div class="setup-note" id="setup-note">Выберите VPN-интерфейс ниже. Остальное программа подготовит автоматически при запуске Tunnel.</div>
+        </div>
+
+        <div class="tunnel-flow mono" aria-label="Agent Tunnel data path"><span>Antigravity</span><b>→</b><span>TUN</span><b>→</b><span>process policy</span><b>→</b><span>DoH</span><b>→</b><span>VPN</span><b>→</b><span>Google</span></div>
+
+        <div class="button-row tunnel-actions">
+          <button class="primary big" data-action="tunnel/launch">Подготовить Tunnel и запустить IDE</button>
+          <button class="secondary" data-action="tunnel/start">Подготовить / поднять без IDE</button>
+          <button class="danger-soft" data-action="tunnel/stop">Остановить</button>
           <button data-action="agent-doctor">Agent Doctor</button>
         </div>
-        <div class="hint" id="tunnel-hint">Windows: обычно нужны права Administrator. Linux: root/CAP_NET_ADMIN.</div>
+        <div class="hint hint-box" id="tunnel-hint" aria-live="polite">Linux: при первом запуске может появиться системный PolicyKit-диалог для выдачи минимальных capabilities managed sing-box.</div>
+      </section>
+
+      <section class="panel route-panel">
+        <div class="panel-title"><span>Маршрут</span><span class="muted">DoH → sing-box → VPN interface → Google</span></div>
+        <div class="form-grid">
+          <label class="field-wide"><span>VPN-интерфейс <em>обязательно для Agent Tunnel</em></span><select id="vpn-interface"></select><small id="vpn-help">Выберите интерфейс, через который реально выходит VPN.</small></label>
+          <label><span>DNS over HTTPS</span><select id="dns-provider"><option value="cloudflare">Cloudflare 1.1.1.1</option><option value="google">Google 8.8.8.8</option></select></label>
+          <label><span>Local proxy port</span><input id="proxy-port" type="number" min="1024" max="65535" value="7890"></label>
+          <label class="check"><input id="auto-open" type="checkbox"><span>Автооткрытие UI</span></label>
+        </div>
+        <div class="advanced-row">
+          <label class="check compact"><input id="tunnel-domain-fallback" type="checkbox"><span>Domain fallback для Google endpoints <small>совместимее с неизвестными helper, но слабее process isolation</small></span></label>
+        </div>
+        <div class="button-row"><button class="secondary" data-action="save-config">Сохранить маршрут</button></div>
       </section>
 
       <section class="panel assurance-panel">
         <div class="panel-title">
-          <span>Runtime network assurance</span>
+          <div><div class="section-kicker">После запуска</div><span>Runtime network assurance</span></div>
           <button class="ghost" data-action="attestation">Показать evidence</button>
         </div>
-        <p class="tunnel-copy">Независимая проверка цепочки <span class="mono">process tree → live socket/PID → sing-box outbound → vpn-direct → внешний egress</span>. Маршрутная доказанность и ширина policy показываются отдельно: <span class="mono">VERIFIED</span> не скрывает режим <span class="mono">ISOLATION-RELAXED</span>.</p>
-        <div class="status-grid">
+        <p class="tunnel-copy">Проверка цепочки <span class="mono">process tree → live socket/PID → sing-box outbound → vpn-direct → внешний egress</span>. Маршрутная доказанность и ширина policy показываются отдельно.</p>
+        <div class="status-grid assurance-grid">
           <div class="metric"><span>Assurance</span><strong id="assurance-state">—</strong></div>
           <div class="metric"><span>Isolation</span><strong id="assurance-isolation">—</strong></div>
           <div class="metric"><span>PID route</span><strong id="assurance-pids">—</strong></div>
@@ -73,30 +110,18 @@
         <div class="hint" id="assurance-isolation-detail"></div>
       </section>
 
-      <section class="panel">
-        <div class="panel-title"><span>Маршрут</span><span class="muted">DoH → sing-box → VPN interface → Google</span></div>
-        <div class="form-grid">
-          <label><span>VPN-интерфейс</span><select id="vpn-interface"></select></label>
-          <label><span>DNS over HTTPS</span><select id="dns-provider"><option value="cloudflare">Cloudflare 1.1.1.1</option><option value="google">Google 8.8.8.8</option></select></label>
-          <label><span>Local proxy port</span><input id="proxy-port" type="number" min="1024" max="65535" value="7890"></label>
-          <label class="check"><input id="auto-open" type="checkbox"><span>Автооткрытие UI при старте</span></label>
-          <label class="check"><input id="tunnel-domain-fallback" type="checkbox"><span>Domain fallback для Google endpoints — повышает совместимость с неизвестными helper, но ослабляет process isolation</span></label>
-        </div>
-        <div class="button-row"><button class="secondary" data-action="save-config">Сохранить</button></div>
+      <section class="action-grid secondary-tools">
+        <article class="panel action-card"><h3>sing-box</h3><p>Официальный portable build с проверкой SHA-256 и provenance.</p><div class="button-row"><button data-action="install">Установить / проверить</button><button data-action="start">SAFE proxy</button><button data-action="stop" class="danger-soft">Стоп</button></div></article>
+        <article class="panel action-card"><h3>Проверка тракта</h3><p>HTTP CONNECT + SOCKS5h remote DNS + системная TLS-проверка.</p><div class="button-row"><button data-action="test">Тесты</button><button data-action="diagnostics">DNS диагностика</button></div></article>
+        <article class="panel action-card"><h3>Antigravity</h3><p>Production Cloud Code endpoint и process-only launch environment.</p><div class="button-row"><button data-action="endpoint">Force endpoint</button><button data-action="launch">Запустить IDE</button><button data-action="agent-doctor">Agent Doctor</button></div></article>
+        <article class="panel action-card warning-card"><h3>Emergency hosts</h3><p>Последний fallback. A-запись берётся через pinned DoH; изменение маркерное и обратимое.</p><div class="button-row"><button data-action="hosts-enable" class="warn">Включить</button><button data-action="hosts-disable">Удалить</button></div></article>
       </section>
 
-      <section class="action-grid">
-        <article class="panel action-card"><h3>sing-box</h3><p>Официальный portable build, проверка SHA-256 digest из GitHub Release metadata.</p><div class="button-row"><button data-action="install">Установить / проверить</button><button data-action="start">SAFE proxy</button><button data-action="stop" class="danger-soft">Стоп</button></div></article>
-        <article class="panel action-card"><h3>Проверка тракта</h3><p>HTTP proxy + SOCKS5h с удалённым DNS и системной TLS-проверкой.</p><div class="button-row"><button data-action="test">Запустить тесты</button><button data-action="diagnostics">DNS диагностика</button></div></article>
-        <article class="panel action-card"><h3>Antigravity</h3><p>Production Cloud Code endpoint и process-only запуск без глобального proxy Windows/Linux.</p><div class="button-row"><button data-action="endpoint">Force endpoint</button><button data-action="launch">Запустить IDE</button><button data-action="agent-doctor">Agent Doctor</button></div></article>
-        <article class="panel action-card warning-card"><h3>Emergency hosts</h3><p>Только fallback: A-запись берётся через pinned DoH. Требуются Admin/root. Изменение маркерное и обратимое.</p><div class="button-row"><button data-action="hosts-enable" class="warn">Включить</button><button data-action="hosts-disable">Удалить</button></div></article>
-      </section>
-
-      <section class="panel"><div class="panel-title"><span>Результат последнего действия</span><button class="ghost" data-action="clear-output">Очистить</button></div><pre id="output">Готово.</pre></section>
+      <section class="panel result-panel"><div class="panel-title"><span>Результат последнего действия</span><button class="ghost" data-action="clear-output">Очистить</button></div><pre id="output">Готово.</pre></section>
       <section class="panel logs-panel"><div class="panel-title"><span>Live events</span><button class="ghost" data-action="logs">sing-box logs</button></div><div id="events" class="events"></div></section>
     </main>
 
-    <footer>Control plane работает только на loopback. Глобальный HTTP proxy по умолчанию не меняется.</footer>
+    <footer>Control plane слушает только loopback. Пароли не читаются приложением. Системный HTTP proxy по умолчанию не изменяется.</footer>
   </div>
   <script src="/app.js" defer></script>
 </body>
