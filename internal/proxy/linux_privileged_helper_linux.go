@@ -7,40 +7,31 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
 // RunLinuxPrivilegedSetup is the narrow internal entry point executed through
 // pkexec/sudo. It accepts no arbitrary command. The caller must provide the
 // already-verified managed sing-box path and its SHA-256; the helper rechecks
-// the digest after privilege elevation before mutating host state.
+// identity and digest after privilege elevation before mutating host state.
 func RunLinuxPrivilegedSetup(binary, expectedSHA256 string) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("privileged Linux setup helper must run as root")
 	}
 	binary = filepath.Clean(strings.TrimSpace(binary))
-	if !filepath.IsAbs(binary) || filepath.Base(binary) != "sing-box" {
-		return fmt.Errorf("refusing unexpected managed binary path %q", binary)
-	}
-	st, err := os.Stat(binary)
-	if err != nil {
-		return fmt.Errorf("stat managed sing-box: %w", err)
-	}
-	if st.IsDir() || st.Mode()&0o111 == 0 {
-		return fmt.Errorf("managed sing-box is not an executable regular file: %q", binary)
+	if err := validatePrivilegedManagedBinaryTarget(binary); err != nil {
+		return err
 	}
 
 	expectedSHA256 = strings.ToLower(strings.TrimSpace(expectedSHA256))
 	if len(expectedSHA256) != 64 {
 		return fmt.Errorf("invalid expected sing-box SHA-256")
 	}
-	actual, err := sha256File(binary)
-	if err != nil {
-		return fmt.Errorf("hash managed sing-box: %w", err)
-	}
-	if strings.ToLower(actual) != expectedSHA256 {
-		return fmt.Errorf("managed sing-box hash changed before privileged setup: got %s want %s", actual, expectedSHA256)
+	if err := verifyExpectedBinaryHash(binary, expectedSHA256); err != nil {
+		return err
 	}
 
 	if err := privilegedEnsureTunDevice(); err != nil {
@@ -50,8 +41,26 @@ func RunLinuxPrivilegedSetup(binary, expectedSHA256 string) error {
 	if err != nil {
 		return err
 	}
+
+	// Package installation/modprobe can take time. Recheck immediately before
+	// granting capabilities so a same-user replacement cannot reuse the earlier
+	// digest check. This is intentionally fail-closed.
+	if err := validatePrivilegedManagedBinaryTarget(binary); err != nil {
+		return err
+	}
+	if err := verifyExpectedBinaryHash(binary, expectedSHA256); err != nil {
+		return err
+	}
 	if out, err := exec.Command(setcap, linuxTunnelCapabilitySpec, binary).CombinedOutput(); err != nil {
 		return fmt.Errorf("setcap managed sing-box: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+
+	// Verify content again after setcap. File capabilities only change xattrs, so
+	// the content digest must remain identical. If a race replaced the file,
+	// revoke capabilities immediately and fail.
+	if err := verifyExpectedBinaryHash(binary, expectedSHA256); err != nil {
+		_, _ = exec.Command(setcap, "-r", binary).CombinedOutput()
+		return fmt.Errorf("managed binary changed during capability grant; capabilities revoked: %w", err)
 	}
 	caps, err := exec.Command(getcap, binary).CombinedOutput()
 	if err != nil {
@@ -59,6 +68,72 @@ func RunLinuxPrivilegedSetup(binary, expectedSHA256 string) error {
 	}
 	if missing := missingLinuxCapabilities(string(caps)); len(missing) > 0 {
 		return fmt.Errorf("post-setcap verification failed; missing [%s]", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func validatePrivilegedManagedBinaryTarget(binary string) error {
+	if !filepath.IsAbs(binary) || filepath.Base(binary) != "sing-box" {
+		return fmt.Errorf("refusing unexpected managed binary path %q", binary)
+	}
+	parent := filepath.Dir(binary)
+	if filepath.Base(parent) != "bin" || filepath.Base(filepath.Dir(parent)) != "AntigravitiProxi" {
+		return fmt.Errorf("refusing binary outside AntigravitiProxi/bin ownership boundary: %q", binary)
+	}
+	lst, err := os.Lstat(binary)
+	if err != nil {
+		return fmt.Errorf("lstat managed sing-box: %w", err)
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing symlink as privileged managed sing-box target: %q", binary)
+	}
+	if !lst.Mode().IsRegular() || lst.Mode()&0o111 == 0 {
+		return fmt.Errorf("managed sing-box is not an executable regular file: %q", binary)
+	}
+
+	uid, haveInvoker, err := invokingDesktopUID()
+	if err != nil {
+		return err
+	}
+	if haveInvoker {
+		stat, ok := lst.Sys().(*syscall.Stat_t)
+		if !ok {
+			return fmt.Errorf("cannot verify managed sing-box owner")
+		}
+		if stat.Uid != uid {
+			return fmt.Errorf("refusing capability grant: managed sing-box owner uid=%d does not match invoking desktop uid=%d", stat.Uid, uid)
+		}
+		if pst, err := os.Stat(parent); err != nil {
+			return fmt.Errorf("stat managed bin directory: %w", err)
+		} else if ps, ok := pst.Sys().(*syscall.Stat_t); !ok || ps.Uid != uid {
+			return fmt.Errorf("refusing capability grant: managed bin directory is not owned by invoking desktop uid=%d", uid)
+		}
+	}
+	return nil
+}
+
+func invokingDesktopUID() (uint32, bool, error) {
+	for _, key := range []string{"PKEXEC_UID", "SUDO_UID"} {
+		raw := strings.TrimSpace(os.Getenv(key))
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.ParseUint(raw, 10, 32)
+		if err != nil {
+			return 0, false, fmt.Errorf("invalid %s=%q", key, raw)
+		}
+		return uint32(v), true, nil
+	}
+	return 0, false, nil
+}
+
+func verifyExpectedBinaryHash(binary, expected string) error {
+	actual, err := sha256File(binary)
+	if err != nil {
+		return fmt.Errorf("hash managed sing-box: %w", err)
+	}
+	if strings.ToLower(actual) != expected {
+		return fmt.Errorf("managed sing-box hash changed before privileged setup: got %s want %s", actual, expected)
 	}
 	return nil
 }
