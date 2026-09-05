@@ -92,6 +92,7 @@ func (m *Manager) AgentTunnelPrivilegeHint() string {
 }
 
 func (m *Manager) StopAndWait(ctx context.Context) error {
+	hadTunnelState := m.Mode() == ModeAgentTunnel || m.NetworkJournalStatus().Open
 	if err := m.Stop(); err != nil {
 		return err
 	}
@@ -99,6 +100,11 @@ func (m *Manager) StopAndWait(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if !m.ManagedRunning() {
+			if hadTunnelState {
+				if err := m.finishTunnelTransaction(ctx); err != nil {
+					return fmt.Errorf("managed helper stopped but network-state recovery failed: %w", err)
+				}
+			}
 			return nil
 		}
 		select {
@@ -109,6 +115,8 @@ func (m *Manager) StopAndWait(ctx context.Context) error {
 			if cmd != nil && cmd.Process != nil {
 				_ = cmd.Process.Kill()
 			}
+			// Leave the durable journal open. The next start will detect it and
+			// recover only resources attributable to the captured transaction.
 			return ctx.Err()
 		case <-ticker.C:
 		}
@@ -194,7 +202,7 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 	tunInbound := map[string]any{
 		"type":           "tun",
 		"tag":            agentTunnelTag,
-		"interface_name": "antigravity-tun",
+		"interface_name": agentTunName,
 		"address":        []string{"172.31.255.1/30", "fdfe:dcba:9876::1/126"},
 		"mtu":            1500,
 		"auto_route":     true,
@@ -291,7 +299,8 @@ func writeAgentTunnelConfig(cfg Config, path string, options AgentTunnelOptions)
 // StartAgentTunnel does not trust a matching binary merely because it exists.
 // The privileged TUN data plane must come from a release whose archive digest
 // was verified and whose installed binary still matches persisted provenance.
-// Startup itself is also transactional at the managed-process boundary.
+// The network mutation is journaled before sing-box starts so even a crash
+// between route application and readiness can be recovered conservatively.
 func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelOptions) error {
 	if !m.AgentTunnelSupported() {
 		return fmt.Errorf("Agent Tunnel is unsupported on %s", runtime.GOOS)
@@ -313,45 +322,56 @@ func (m *Manager) StartAgentTunnel(ctx context.Context, provided ...AgentTunnelO
 		options.StrictRoute = true
 	}
 
-	m.mu.Lock()
-	if m.cmd != nil && m.cmd.Process != nil {
-		mode := m.mode
-		m.mu.Unlock()
-		return fmt.Errorf("sing-box already started by this process in %s mode; stop it before starting Agent Tunnel", mode)
+	if m.ManagedRunning() {
+		return fmt.Errorf("sing-box already started by this process in %s mode; stop it before starting Agent Tunnel", m.Mode())
 	}
-	vpn := strings.TrimSpace(m.cfg.VPNInterface)
+	cfg := m.Config()
+	vpn := strings.TrimSpace(cfg.VPNInterface)
 	if vpn == "" {
-		m.mu.Unlock()
 		return errors.New("Agent Tunnel requires an explicit VPN interface")
 	}
-	if vpn == "antigravity-tun" {
-		m.mu.Unlock()
+	if vpn == agentTunName {
 		return errors.New("Agent Tunnel cannot use its own TUN interface as the VPN upstream")
 	}
 	iface, err := net.InterfaceByName(vpn)
 	if err != nil {
-		m.mu.Unlock()
 		return fmt.Errorf("selected VPN interface %q does not exist: %w", vpn, err)
 	}
 	if iface.Flags&net.FlagUp == 0 {
-		m.mu.Unlock()
 		return fmt.Errorf("selected VPN interface %q is down", vpn)
+	}
+
+	if err := m.beginTunnelTransaction(ctx); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	if m.cmd != nil && m.cmd.Process != nil {
+		mode := m.mode
+		m.mu.Unlock()
+		m.abortPreparedTunnelTransaction("managed process appeared during startup transaction")
+		return fmt.Errorf("sing-box concurrently started in %s mode", mode)
 	}
 	if err := writeAgentTunnelConfig(m.cfg, m.TunnelConfigPath(), options); err != nil {
 		m.mu.Unlock()
+		m.abortPreparedTunnelTransaction("config write failed: " + err.Error())
 		return err
 	}
 	err = m.startLocked(ctx, m.TunnelConfigPath(), ModeAgentTunnel,
 		fmt.Sprintf("Agent Tunnel starting: TUN -> Antigravity process/domain policy -> %s; unrelated traffic -> system-direct", m.cfg.VPNInterface))
 	m.mu.Unlock()
 	if err != nil {
+		m.abortPreparedTunnelTransaction("sing-box start failed: " + err.Error())
 		return err
 	}
 
 	if err := m.waitAgentTunnelReady(ctx, 8*time.Second); err != nil {
 		return m.rollbackFailedAgentTunnelStart(err)
 	}
-	m.log("info", "Agent Tunnel readiness proven: managed listener ownership + TUN interface")
+	if err := m.markTunnelActive(ctx); err != nil {
+		return m.rollbackFailedAgentTunnelStart(fmt.Errorf("persist active network-state evidence: %w", err))
+	}
+	m.log("info", "Agent Tunnel readiness proven: managed listener ownership + TUN interface + durable route/rule fingerprint")
 	return nil
 }
 
@@ -367,7 +387,7 @@ func (m *Manager) waitAgentTunnelReady(ctx context.Context, maxWait time.Duratio
 			return errors.New("sing-box exited before Agent Tunnel readiness was established")
 		}
 		tunOK := false
-		if iface, err := net.InterfaceByName("antigravity-tun"); err == nil && iface.Flags&net.FlagUp != 0 {
+		if iface, err := net.InterfaceByName(agentTunName); err == nil && iface.Flags&net.FlagUp != 0 {
 			tunOK = true
 		}
 		listenerOK, detail := m.ManagedListenerOwned()
@@ -388,13 +408,13 @@ func (m *Manager) waitAgentTunnelReady(ctx context.Context, maxWait time.Duratio
 
 func (m *Manager) rollbackFailedAgentTunnelStart(cause error) error {
 	m.log("error", "Agent Tunnel readiness failed; rolling back: "+cause.Error())
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	if err := m.StopAndWait(ctx); err != nil {
 		return fmt.Errorf("%w; rollback also failed: %v", cause, err)
 	}
-	if _, err := net.InterfaceByName("antigravity-tun"); err == nil {
-		return fmt.Errorf("%w; rollback stopped sing-box but antigravity-tun still exists", cause)
+	if _, err := net.InterfaceByName(agentTunName); err == nil {
+		return fmt.Errorf("%w; rollback stopped sing-box but %s still exists", cause, agentTunName)
 	}
 	return cause
 }
