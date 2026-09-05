@@ -40,6 +40,9 @@ func TestNetworkAttestationEndpointIsReadOnlyAndReturnsIdleEvidence(t *testing.T
 	if got.Detail == "" {
 		t.Fatal("attestation endpoint must explain its evidence state")
 	}
+	if got.EgressCached || got.EgressFreshUntil != nil {
+		t.Fatalf("idle report must not expose stale egress cache metadata: cached=%v fresh_until=%v", got.EgressCached, got.EgressFreshUntil)
+	}
 	if csp := rr.Header().Get("Content-Security-Policy"); csp == "" {
 		t.Fatal("attestation endpoint must retain control-plane security headers")
 	}
