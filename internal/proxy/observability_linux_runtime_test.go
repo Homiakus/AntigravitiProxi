@@ -3,8 +3,12 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -41,7 +45,7 @@ func TestLinuxAgentTunnelObservabilityRuntime(t *testing.T) {
 		t.Fatalf("prepare verified provenance: %v", err)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 24*time.Second)
 	defer cancel()
 	if err := m.StartAgentTunnel(ctx); err != nil {
 		t.Fatalf("start Agent Tunnel: %v", err)
@@ -109,4 +113,71 @@ func TestLinuxAgentTunnelObservabilityRuntime(t *testing.T) {
 		t.Fatalf("expected distinct vpn/system egress relation, got %q; attestation=%#v", attestation.SystemRelation, attestation)
 	}
 	t.Logf("external egress attestation: %s", attestation.Detail)
+
+	// Keep one real Antigravity-named process socket open long enough to join
+	// sing-box source-endpoint evidence with /proc socket inode ownership. This
+	// closes the gap between a path-based routing rule and a concrete live PID.
+	probeBin := strings.TrimSpace(os.Getenv("AGP_EGRESS_PROBE_BIN"))
+	if probeBin == "" {
+		t.Fatal("AGP_EGRESS_PROBE_BIN is required for PID route attestation")
+	}
+	pidProbe := filepath.Join(root, "antigravity-pid-probe")
+	if err := copyFile(probeBin, pidProbe, 0o755); err != nil {
+		t.Fatalf("prepare PID probe: %v", err)
+	}
+	holdURL := strings.TrimRight(probeURL, "/") + "/hold"
+	cmd := exec.Command(pidProbe, holdURL)
+	cmd.Env = probeEnvironment(os.Environ())
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start PID probe: %v", err)
+	}
+	pid := cmd.Process.Pid
+	waited := false
+	defer func() {
+		if !waited && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+
+	var pidEvidence PIDRouteAttestation
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		pidEvidence = m.AttestAgentPIDRoutes(ctx, []int{pid})
+		if containsPID(pidEvidence.ActiveCandidatePIDs, pid) && containsPID(pidEvidence.VPNDirectPIDs, pid) {
+			break
+		}
+		if len(pidEvidence.UnexpectedPIDs) > 0 {
+			t.Fatalf("PID probe selected an unexpected outbound: %#v", pidEvidence)
+		}
+		if time.Now().After(deadline) {
+			conns, _ := m.RuntimeConnections(ctx)
+			t.Fatalf("PID/socket route correlation timeout for pid=%d; evidence=%#v connections=%#v stderr=%q", pid, pidEvidence, conns, stderr.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if pidEvidence.AmbiguousConnections != 0 || len(pidEvidence.UnexpectedPIDs) != 0 {
+		t.Fatalf("PID route evidence is not exact: %#v", pidEvidence)
+	}
+	if err := cmd.Wait(); err != nil {
+		waited = true
+		t.Fatalf("PID probe failed: %v stderr=%q", err, stderr.String())
+	}
+	waited = true
+	if got := strings.TrimSpace(stdout.String()); expectedVPN != "" && got != expectedVPN {
+		t.Fatalf("PID-attributed probe external source=%q want vpn=%q; evidence=%#v", got, expectedVPN, pidEvidence)
+	}
+	t.Logf("PID-level route attestation: pid=%d %s", pid, pidEvidence.Detail)
+}
+
+func containsPID(values []int, want int) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
