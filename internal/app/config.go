@@ -20,6 +20,7 @@ type Settings struct {
 	DNSProvider          string   `json:"dns_provider"`
 	SingBoxVer           string   `json:"sing_box_version"`
 	AutoOpen             bool     `json:"auto_open"`
+	ProxyAutoStart       bool     `json:"proxy_auto_start"`
 	TunnelStrictRoute    bool     `json:"tunnel_strict_route"`
 	TunnelDomainFallback bool     `json:"tunnel_domain_fallback"`
 	TunnelLearnedDomains []string `json:"tunnel_learned_domains,omitempty"`
@@ -33,6 +34,7 @@ func defaultSettings() Settings {
 		DNSProvider:          "cloudflare",
 		SingBoxVer:           proxy.DefaultSingBoxVersion,
 		AutoOpen:             true,
+		ProxyAutoStart:       true,
 		TunnelStrictRoute:    false,
 		TunnelDomainFallback: false,
 	}
@@ -69,6 +71,9 @@ func loadSettings(path string) Settings {
 	// explicitly enabled the field keep their chosen compatibility mode.
 	var raw map[string]json.RawMessage
 	if json.Unmarshal(b, &raw) == nil {
+		if _, ok := raw["proxy_auto_start"]; !ok {
+			s.ProxyAutoStart = true
+		}
 		if _, ok := raw["tunnel_domain_fallback"]; !ok {
 			s.TunnelDomainFallback = false
 		}

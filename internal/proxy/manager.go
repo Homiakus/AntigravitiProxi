@@ -45,13 +45,13 @@ type Config struct {
 }
 
 type Manager struct {
-	mu                     sync.Mutex
-	cfg                    Config
-	cmd                    *exec.Cmd
-	hardCmd                *exec.Cmd
-	logger                 Logger
-	mode                   Mode
-	proxyReadinessFallback bool
+	mu                      sync.Mutex
+	cfg                     Config
+	cmd                     *exec.Cmd
+	hardCmd                 *exec.Cmd
+	logger                  Logger
+	mode                    Mode
+	proxyReadinessConfirmed bool
 }
 
 type release struct {
@@ -116,12 +116,12 @@ func (m *Manager) Mode() Mode {
 	return m.mode
 }
 
-// MarkProxyReadinessFallback records that the ordinary local proxy was
-// reachable while /proc socket attribution was unavailable. This is only for
-// the non-tunnel proxy mode; Agent Tunnel retains strict ownership checks.
-func (m *Manager) MarkProxyReadinessFallback() {
+// MarkProxyReadinessConfirmed records that this manager observed its proxy
+// process alive and the configured listener reachable after Start. It is not
+// listener ownership evidence and must never make the ownership dimension OK.
+func (m *Manager) MarkProxyReadinessConfirmed() {
 	m.mu.Lock()
-	m.proxyReadinessFallback = true
+	m.proxyReadinessConfirmed = true
 	m.mu.Unlock()
 }
 
@@ -432,7 +432,7 @@ func (m *Manager) startLocked(ctx context.Context, configPath string, mode Mode,
 	}
 	m.cmd = cmd
 	m.mode = mode
-	m.proxyReadinessFallback = false
+	m.proxyReadinessConfirmed = false
 
 	go func() {
 		err := cmd.Wait()

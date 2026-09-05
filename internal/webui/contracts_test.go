@@ -60,15 +60,16 @@ func TestOneClickTunnelSetupIsVisibleAndWired(t *testing.T) {
 		`id="setup-vpn"`,
 		`id="setup-privileges"`,
 		`id="setup-runtime"`,
-		`Подготовить и запустить Antigravity`,
-		`Запустить Tunnel без IDE`,
+		`Запустить proxy и Antigravity`,
+		`Запустить proxy`,
+		`Остановить proxy`,
+		`127.0.0.1:7890`,
 		`id="system-summary"`,
 		`id="save-status"`,
 		`id="diagnostics-panel"`,
 		`id="diagnostics-ip"`,
 		`id="diagnostics-details"`,
-		`системное окно авторизации`,
-		`Пароль не читается и не хранится`,
+		`Локальный proxy запускается без TUN`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Fatalf("index.html is missing setup UX marker %q", want)
@@ -77,11 +78,8 @@ func TestOneClickTunnelSetupIsVisibleAndWired(t *testing.T) {
 
 	for _, want := range []string{
 		`function renderSetup()`,
-		`async function prepareTunnelRoute()`,
-		`candidates.length===1`,
-		`await api('/api/actions/stop',{method:'POST'})`,
-		`PolicyKit-диалог`,
-		`function friendlyTunnelError`,
+		`state.proxy_running?'ready':'auto'`,
+		`TUN и системные proxy-настройки не изменяются.`,
 		`async function refreshDiagnostics`,
 		`api('/api/diagnostics')`,
 	} {

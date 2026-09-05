@@ -34,6 +34,7 @@ var targetDomains = []string{
 
 type Server struct {
 	mu           sync.Mutex
+	lifecycleMu  sync.Mutex
 	root         string
 	settingsPath string
 	settings     Settings
@@ -327,12 +328,16 @@ type settingsPatch struct {
 	DNSProvider          *string   `json:"dns_provider"`
 	SingBoxVer           *string   `json:"sing_box_version"`
 	AutoOpen             *bool     `json:"auto_open"`
+	ProxyAutoStart       *bool     `json:"proxy_auto_start"`
 	TunnelStrictRoute    *bool     `json:"tunnel_strict_route"`
 	TunnelDomainFallback *bool     `json:"tunnel_domain_fallback"`
 	TunnelLearnedDomains *[]string `json:"tunnel_learned_domains,omitempty"`
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
 	var in settingsPatch
 	if err := decodeJSON(r, &in); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -361,6 +366,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.AutoOpen != nil {
 		cur.AutoOpen = *in.AutoOpen
+	}
+	if in.ProxyAutoStart != nil {
+		cur.ProxyAutoStart = *in.ProxyAutoStart
 	}
 	if in.TunnelStrictRoute != nil {
 		cur.TunnelStrictRoute = *in.TunnelStrictRoute
@@ -435,6 +443,9 @@ func (s *Server) handleInstall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) startSafeProxy(ctx context.Context) error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+
 	health := s.pm.Health()
 	if s.pm.Mode() == proxy.ModeProxy && health.State == proxy.HealthHealthy {
 		return nil
@@ -467,14 +478,9 @@ func (s *Server) startSafeProxy(ctx context.Context) error {
 			if owned, detail := s.pm.ManagedListenerOwned(); owned {
 				s.events.publish("info", "SAFE proxy readiness proven by managed listener ownership")
 			} else {
-				// A plain local proxy is useful to periodically-launched clients even
-				// when Linux /proc socket attribution is unavailable or races with
-				// sing-box startup. The managed process must still be alive and the
-				// configured port must accept connections; Agent Tunnel keeps the
-				// stronger ownership requirement below its own startup path.
-				s.events.publish("warn", "SAFE proxy is reachable; listener ownership proof unavailable: "+detail)
-				s.pm.MarkProxyReadinessFallback()
+				s.events.publish("warn", "SAFE proxy is reachable; listener ownership is unproven: "+detail)
 			}
+			s.pm.MarkProxyReadinessConfirmed()
 			return nil
 		}
 		select {
@@ -504,19 +510,34 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.setProxyAutoStart(true)
 	writeJSON(w, map[string]any{"ok": true, "proxy": s.pm.HTTPProxyURL(), "mode": "safe-proxy", "health": s.pm.Health()})
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if err := s.pm.StopAndWait(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.setProxyAutoStart(false)
 	s.invalidateEgressEvidence("managed data plane stopped")
 	s.events.publish("info", "managed data plane stopped")
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) setProxyAutoStart(enabled bool) {
+	s.mu.Lock()
+	cur := s.settings
+	cur.ProxyAutoStart = enabled
+	s.settings = cur
+	s.mu.Unlock()
+	if err := saveSettings(s.settingsPath, cur); err != nil {
+		s.events.publish("warn", "persist proxy auto-start: "+err.Error())
+	}
 }
 
 func (s *Server) handleTest(w http.ResponseWriter, r *http.Request) {
@@ -593,6 +614,7 @@ func (s *Server) handleSafeMode(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.setProxyAutoStart(true)
 
 	files, err := antigravity.ForceProductionEndpoint()
 	if err != nil {
@@ -628,6 +650,7 @@ func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.setProxyAutoStart(true)
 	writeJSON(w, map[string]any{
 		"ok": true, "mode": "safe-proxy", "active": false,
 		"local_proxy": s.pm.HTTPProxyURL(), "health": s.pm.Health(),
@@ -638,10 +661,13 @@ func (s *Server) handleTunnelStart(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTunnelStop(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	if err := s.pm.StopAndWait(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.setProxyAutoStart(false)
 	s.invalidateEgressEvidence("Agent Tunnel stopped")
 	s.events.publish("info", "Agent Tunnel stopped; managed routes released")
 	writeJSON(w, map[string]bool{"ok": true})
@@ -657,6 +683,7 @@ func (s *Server) handleTunnelLaunch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.setProxyAutoStart(true)
 	legacyFiles, legacyErr := antigravity.ForceProductionEndpoint()
 	if legacyErr != nil {
 		s.events.publish("warn", "endpoint override: "+legacyErr.Error())
@@ -697,5 +724,31 @@ func (s *Server) Serve(ctx context.Context) error {
 	}()
 
 	log.Printf("AntigravitiProxi UI: http://%s", addr)
+	if s.Settings().ProxyAutoStart {
+		go s.autoStartProxy(ctx)
+	}
 	return srv.Serve(ln)
+}
+
+func (s *Server) autoStartProxy(parent context.Context) {
+	ctx, cancel := context.WithTimeout(parent, 4*time.Minute)
+	defer cancel()
+	backoff := []time.Duration{0, time.Second, 2 * time.Second}
+	for attempt, delay := range backoff {
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+		}
+		if err := s.startSafeProxy(ctx); err == nil {
+			s.events.publish("info", "proxy auto-started")
+			return
+		} else {
+			s.events.publish("warn", fmt.Sprintf("proxy auto-start attempt %d/%d failed: %v", attempt+1, len(backoff), err))
+		}
+	}
 }

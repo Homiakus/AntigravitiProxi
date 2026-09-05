@@ -28,6 +28,9 @@ func TestDefaultSettingsKeepAgentTunnelProcessScoped(t *testing.T) {
 	if got := defaultSettings().TunnelDomainFallback; got {
 		t.Fatal("domain fallback must be disabled by default")
 	}
+	if !defaultSettings().ProxyAutoStart {
+		t.Fatal("proxy must auto-start by default")
+	}
 }
 
 func TestValidateSettingsSecurityAcceptsLoopback(t *testing.T) {
@@ -51,5 +54,15 @@ func TestLoadSettingsSanitizesUnsafePersistedEndpoints(t *testing.T) {
 	}
 	if s.ProxyHost != "127.0.0.1" {
 		t.Fatalf("unsafe proxy host was not sanitized: %q", s.ProxyHost)
+	}
+}
+
+func TestLoadSettingsMigratesLegacyProxyToAutoStart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"listen":"127.0.0.1:48765"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadSettings(path).ProxyAutoStart; !got {
+		t.Fatal("legacy config must enable proxy auto-start")
 	}
 }

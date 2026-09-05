@@ -51,18 +51,16 @@ func (m *Manager) Health() HealthSnapshot {
 		return h
 	}
 
+	listenerReachable := m.Running()
+	h.Dimensions["listener_reachable"] = HealthDimension{OK: listenerReachable, Detail: listenerReachabilityDetail(listenerReachable)}
 	owned, listenerDetail := m.ManagedListenerOwned()
 	m.mu.Lock()
-	readinessFallback := m.proxyReadinessFallback
+	readinessConfirmed := m.proxyReadinessConfirmed
 	m.mu.Unlock()
-	if !owned && readinessFallback && mode == ModeProxy && m.Running() {
-		owned = true
-		listenerDetail = "managed proxy is reachable; /proc listener ownership proof unavailable"
-	}
 	h.Dimensions["mixed_listener_owned"] = HealthDimension{OK: owned, Detail: listenerDetail}
 
 	if mode == ModeProxy {
-		if owned && !journal.Open {
+		if listenerReachable && readinessConfirmed && !journal.Open {
 			h.State = HealthHealthy
 		} else {
 			h.State = HealthDegraded
@@ -97,6 +95,13 @@ func (m *Manager) Health() HealthSnapshot {
 		h.State = HealthDegraded
 	}
 	return h
+}
+
+func listenerReachabilityDetail(ok bool) string {
+	if ok {
+		return "configured local proxy listener accepts TCP connections"
+	}
+	return "configured local proxy listener is not reachable"
 }
 
 func managedProcessDetail(pid int) string {
