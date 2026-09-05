@@ -85,7 +85,7 @@ func New() (*Server, error) {
 				settings.VPNInterface = it.Name
 				break
 			}
-	}
+		}
 	}
 
 	hub := newEventHub()
@@ -133,6 +133,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/diagnostics", s.handleDiagnostics)
 	mux.HandleFunc("GET /api/agent-doctor", s.handleAgentDoctor)
 	mux.HandleFunc("GET /api/process-tree", s.handleProcessTree)
+	mux.HandleFunc("GET /api/attestation", s.handleNetworkAttestation)
 	mux.HandleFunc("GET /api/logs", s.handleLogs)
 
 	mux.HandleFunc("POST /api/config", s.requireCSRF(s.handleConfig))
