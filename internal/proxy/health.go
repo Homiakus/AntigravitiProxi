@@ -27,8 +27,8 @@ type HealthSnapshot struct {
 
 // Health is deliberately evidence-based. A reachable TCP port alone is never
 // considered healthy because a foreign process may own it. Agent Tunnel needs
-// three independent facts: the managed sing-box process owns the local mixed
-// listener, the TUN interface is UP, and the configured VPN upstream is UP.
+// independent proof for the managed listener, TUN, VPN upstream and durable
+// network-state transaction. An unfinished recovery journal blocks healthy.
 func (m *Manager) Health() HealthSnapshot {
 	mode := m.Mode()
 	h := HealthSnapshot{
@@ -38,9 +38,16 @@ func (m *Manager) Health() HealthSnapshot {
 		UpdatedAt:  time.Now().UTC(),
 	}
 
+	journal := m.NetworkJournalStatus()
+	journalOK := !journal.Open || (mode == ModeAgentTunnel && journal.Phase == "active")
+	h.Dimensions["network_journal"] = HealthDimension{OK: journalOK, Detail: journal.Detail}
+
 	managed := m.ManagedRunning()
 	h.Dimensions["managed_process"] = HealthDimension{OK: managed, Detail: managedProcessDetail(m.ManagedPID())}
 	if mode == ModeOff || !managed {
+		if journal.Open {
+			h.State = HealthDegraded
+		}
 		return h
 	}
 
@@ -48,7 +55,7 @@ func (m *Manager) Health() HealthSnapshot {
 	h.Dimensions["mixed_listener_owned"] = HealthDimension{OK: owned, Detail: listenerDetail}
 
 	if mode == ModeProxy {
-		if owned {
+		if owned && !journal.Open {
 			h.State = HealthHealthy
 		} else {
 			h.State = HealthDegraded
@@ -57,8 +64,8 @@ func (m *Manager) Health() HealthSnapshot {
 	}
 
 	tunOK := false
-	tunDetail := "antigravity-tun not present"
-	if iface, err := net.InterfaceByName("antigravity-tun"); err == nil {
+	tunDetail := agentTunName + " not present"
+	if iface, err := net.InterfaceByName(agentTunName); err == nil {
 		tunOK = iface.Flags&net.FlagUp != 0
 		tunDetail = iface.Flags.String()
 	}
@@ -77,7 +84,7 @@ func (m *Manager) Health() HealthSnapshot {
 	}
 	h.Dimensions["vpn_interface"] = HealthDimension{OK: vpnOK, Detail: vpnDetail}
 
-	if owned && tunOK && vpnOK {
+	if owned && tunOK && vpnOK && journalOK {
 		h.State = HealthHealthy
 	} else {
 		h.State = HealthDegraded
