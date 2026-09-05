@@ -45,7 +45,7 @@
           <span>AGENT TUNNEL · уровень 2</span>
           <span class="badge tunnel-badge">Agent transport</span>
         </div>
-        <p class="tunnel-copy">Используйте, если регистрация/OAuth проходят, но агент выдаёт <span class="mono">Agent execution terminated due to error</span>. Режим поднимает sing-box TUN, перехватывает transport/DNS и направляет процессы Antigravity/language_server через выбранный VPN. Остальные приложения идут через <span class="mono">system-direct</span>.</p>
+        <p class="tunnel-copy">Используйте, если регистрация/OAuth проходят, но агент выдаёт <span class="mono">Agent execution terminated due to error</span>. Режим поднимает sing-box TUN, перехватывает transport/DNS и направляет процессы Antigravity/language_server через выбранный VPN. Остальные приложения по строгой process-policy идут через <span class="mono">system-direct</span>; включённый domain fallback явно помечается как ослабление изоляции.</p>
         <div class="tunnel-flow mono"><span>Antigravity</span><b>→</b><span>TUN</span><b>→</b><span>process match</span><b>→</b><span>DoH</span><b>→</b><span>VPN</span><b>→</b><span>Google</span></div>
         <div class="button-row">
           <button class="primary big" data-action="tunnel/launch">Agent Tunnel + запустить IDE</button>
@@ -61,14 +61,16 @@
           <span>Runtime network assurance</span>
           <button class="ghost" data-action="attestation">Показать evidence</button>
         </div>
-        <p class="tunnel-copy">Независимая проверка цепочки <span class="mono">process tree → live socket/PID → sing-box outbound → vpn-direct → внешний egress</span>. Состояние <span class="mono">VERIFIED</span> выставляется только когда все активные атрибутированные процессы доказанно идут через выбранный VPN.</p>
+        <p class="tunnel-copy">Независимая проверка цепочки <span class="mono">process tree → live socket/PID → sing-box outbound → vpn-direct → внешний egress</span>. Маршрутная доказанность и ширина policy показываются отдельно: <span class="mono">VERIFIED</span> не скрывает режим <span class="mono">ISOLATION-RELAXED</span>.</p>
         <div class="status-grid">
           <div class="metric"><span>Assurance</span><strong id="assurance-state">—</strong></div>
+          <div class="metric"><span>Isolation</span><strong id="assurance-isolation">—</strong></div>
           <div class="metric"><span>PID route</span><strong id="assurance-pids">—</strong></div>
           <div class="metric"><span>External egress</span><strong id="assurance-egress">—</strong></div>
           <div class="metric"><span>Evidence age</span><strong id="assurance-age">—</strong></div>
         </div>
         <div class="hint" id="assurance-detail">Ожидание runtime evidence…</div>
+        <div class="hint" id="assurance-isolation-detail"></div>
       </section>
 
       <section class="panel">
@@ -78,6 +80,7 @@
           <label><span>DNS over HTTPS</span><select id="dns-provider"><option value="cloudflare">Cloudflare 1.1.1.1</option><option value="google">Google 8.8.8.8</option></select></label>
           <label><span>Local proxy port</span><input id="proxy-port" type="number" min="1024" max="65535" value="7890"></label>
           <label class="check"><input id="auto-open" type="checkbox"><span>Автооткрытие UI при старте</span></label>
+          <label class="check"><input id="tunnel-domain-fallback" type="checkbox"><span>Domain fallback для Google endpoints — повышает совместимость с неизвестными helper, но ослабляет process isolation</span></label>
         </div>
         <div class="button-row"><button class="secondary" data-action="save-config">Сохранить</button></div>
       </section>
