@@ -2,6 +2,7 @@ const $ = s => document.querySelector(s);
 const csrf = () => document.cookie.split('; ').find(x=>x.startsWith('agp_csrf='))?.split('=')[1] || '';
 const output = $('#output');
 let state = null;
+let assurance = null;
 
 function pretty(v){ return typeof v === 'string' ? v : JSON.stringify(v,null,2); }
 function setOutput(v){ output.textContent = pretty(v); output.scrollTop = 0; }
@@ -52,6 +53,65 @@ async function refresh(){
   $('#auto-open').checked=!!state.settings.auto_open;
 }
 
+function assuranceColor(v){
+  if(v==='verified') return 'var(--good)';
+  if(v==='degraded') return 'var(--bad)';
+  if(v==='partial') return 'var(--warn)';
+  return 'var(--muted)';
+}
+
+function renderAssurance(v){
+  assurance=v;
+  const stateEl=$('#assurance-state');
+  if(!stateEl) return;
+  const level=String(v?.state||'idle').toLowerCase();
+  stateEl.textContent=level.toUpperCase();
+  stateEl.style.color=assuranceColor(level);
+
+  const active=v?.pid_route?.active_candidate_pids?.length||0;
+  const vpn=v?.pid_route?.vpn_direct_pids?.length||0;
+  const ambiguous=v?.pid_route?.ambiguous_connections||0;
+  const pidEl=$('#assurance-pids');
+  pidEl.textContent=active?`${vpn}/${active}${ambiguous?` · amb ${ambiguous}`:''}`:'—';
+  pidEl.style.color=active && vpn===active && !ambiguous?'var(--good)':(ambiguous?'var(--bad)':'var(--muted)');
+
+  const egressEl=$('#assurance-egress');
+  if(v?.egress?.available){
+    const count=v.egress.vpn_observed_ips?.length||0;
+    egressEl.textContent=`PROVEN${count>1?` · ${count} IPs`:''}`;
+    egressEl.style.color='var(--good)';
+  }else{
+    egressEl.textContent='UNAVAILABLE';
+    egressEl.style.color=level==='degraded'?'var(--bad)':'var(--muted)';
+  }
+
+  const ageEl=$('#assurance-age');
+  if(v?.egress?.observed_at){
+    const observed=new Date(v.egress.observed_at);
+    const age=Math.max(0,Math.round((Date.now()-observed.getTime())/1000));
+    const until=v.egress_fresh_until?new Date(v.egress_fresh_until):null;
+    const left=until?Math.max(0,Math.ceil((until.getTime()-Date.now())/1000)):0;
+    ageEl.textContent=`${v.egress_cached?'cached':'fresh'} · ${age}s${until?` · TTL ${left}s`:''}`;
+  }else{
+    ageEl.textContent='—';
+  }
+  ageEl.style.color=v?.egress_cached?'var(--warn)':'var(--muted)';
+  $('#assurance-detail').textContent=v?.detail||'Нет evidence.';
+}
+
+async function refreshAssurance(){
+  try{
+    renderAssurance(await api('/api/attestation'));
+  }catch(e){
+    const stateEl=$('#assurance-state');
+    if(stateEl){
+      stateEl.textContent='ERROR';
+      stateEl.style.color='var(--bad)';
+      $('#assurance-detail').textContent=e.message;
+    }
+  }
+}
+
 function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
 async function action(name){
@@ -60,14 +120,17 @@ async function action(name){
     let res;
 
     if(name==='refresh'){
-      await refresh();
+      await Promise.all([refresh(),refreshAssurance()]);
       return;
     }
     if(name==='clear-output'){
       setOutput('Готово.');
       return;
     }
-    if(name==='save-config'){
+    if(name==='attestation'){
+      res=await api('/api/attestation');
+      renderAssurance(res);
+    }else if(name==='save-config'){
       res=await api('/api/config',{method:'POST',body:{
         vpn_interface:$('#vpn-interface').value,
         dns_provider:$('#dns-provider').value,
@@ -88,7 +151,7 @@ async function action(name){
     }
 
     setOutput(res);
-    await refresh();
+    await Promise.all([refresh(),refreshAssurance()]);
   }catch(e){
     setOutput('ERROR\n'+e.message);
   }finally{
@@ -125,6 +188,9 @@ function connectEvents(){
 }
 
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
-refresh().catch(e=>setOutput(e.message));
+Promise.all([refresh(),refreshAssurance()]).catch(e=>setOutput(e.message));
 connectEvents();
-setInterval(()=>refresh().catch(()=>{}),5000);
+setInterval(()=>{
+  refresh().catch(()=>{});
+  refreshAssurance().catch(()=>{});
+},5000);
