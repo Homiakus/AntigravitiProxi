@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/Homiakus/AntigravitiProxi/internal/antigravity"
@@ -19,13 +20,13 @@ const (
 )
 
 type NetworkAttestationReport struct {
-	State       AssuranceState                 `json:"state"`
-	ObservedAt  time.Time                      `json:"observed_at"`
-	ProcessTree antigravity.ProcessTreeReport  `json:"process_tree"`
-	Route       proxy.RouteAttestation         `json:"route"`
-	PIDRoute    proxy.PIDRouteAttestation      `json:"pid_route"`
-	Egress      proxy.PublicEgressAttestation  `json:"egress"`
-	Detail      string                         `json:"detail"`
+	State       AssuranceState                `json:"state"`
+	ObservedAt  time.Time                     `json:"observed_at"`
+	ProcessTree antigravity.ProcessTreeReport `json:"process_tree"`
+	Route       proxy.RouteAttestation        `json:"route"`
+	PIDRoute    proxy.PIDRouteAttestation     `json:"pid_route"`
+	Egress      proxy.PublicEgressAttestation `json:"egress"`
+	Detail      string                        `json:"detail"`
 }
 
 // networkAttestation composes independent evidence instead of treating one
