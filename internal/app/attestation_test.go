@@ -8,6 +8,31 @@ import (
 	"github.com/Homiakus/AntigravitiProxi/internal/proxy"
 )
 
+func TestClassifyIsolationPolicy(t *testing.T) {
+	cases := []struct {
+		name     string
+		active   bool
+		fallback bool
+		want     IsolationState
+	}{
+		{name: "inactive", active: false, fallback: false, want: IsolationInactive},
+		{name: "inactive-ignores-fallback", active: false, fallback: true, want: IsolationInactive},
+		{name: "strict-process-policy", active: true, fallback: false, want: IsolationStrict},
+		{name: "domain-fallback-relaxes-isolation", active: true, fallback: true, want: IsolationRelaxed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, detail := classifyIsolationPolicy(tc.active, tc.fallback)
+			if got != tc.want {
+				t.Fatalf("isolation=%q want=%q detail=%q", got, tc.want, detail)
+			}
+			if strings.TrimSpace(detail) == "" {
+				t.Fatal("isolation classification must explain its policy state")
+			}
+		})
+	}
+}
+
 func TestClassifyNetworkAttestation(t *testing.T) {
 	base := NetworkAttestationReport{
 		ProcessTree: antigravity.ProcessTreeReport{
@@ -64,5 +89,32 @@ func TestClassifyNetworkAttestation(t *testing.T) {
 				t.Fatal("classification must always explain its evidence state")
 			}
 		})
+	}
+}
+
+func TestVerifiedRouteEvidenceDoesNotHideRelaxedIsolation(t *testing.T) {
+	state, detail := classifyNetworkAttestation(true, NetworkAttestationReport{
+		ProcessTree: antigravity.ProcessTreeReport{
+			Complete: true,
+			Processes: []antigravity.ProcessInfo{{PID: 101, Name: "Antigravity.exe", Known: true}},
+		},
+		Route: proxy.RouteAttestation{Available: true, AgentObserved: 1, AgentVPNDirect: 1},
+		PIDRoute: proxy.PIDRouteAttestation{
+			Available:           true,
+			CandidatePIDs:       []int{101},
+			ActiveCandidatePIDs: []int{101},
+			VPNDirectPIDs:       []int{101},
+		},
+		Egress: proxy.PublicEgressAttestation{Available: true},
+	})
+	if state != AssuranceVerified {
+		t.Fatalf("route evidence state=%q want verified; detail=%q", state, detail)
+	}
+	isolation, isolationDetail := classifyIsolationPolicy(true, true)
+	if isolation != IsolationRelaxed {
+		t.Fatalf("domain fallback isolation=%q want=%q", isolation, IsolationRelaxed)
+	}
+	if !strings.Contains(strings.ToLower(isolationDetail), "domain fallback") {
+		t.Fatalf("relaxed isolation detail does not name cause: %q", isolationDetail)
 	}
 }
