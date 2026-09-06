@@ -40,3 +40,24 @@ func TestWriteRejectsEmptyPath(t *testing.T) {
 		t.Fatal("expected error for empty path")
 	}
 }
+
+func TestWriteDirectDoesNotCreatePreviousGood(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hosts")
+	data := []byte("127.0.0.1 localhost\n")
+
+	if err := WriteDirect(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("got %q, want %q", got, data)
+	}
+
+	if _, err := os.Stat(path + ".previous-good"); !os.IsNotExist(err) {
+		t.Fatalf(".previous-good should not exist for WriteDirect, err=%v", err)
+	}
+}

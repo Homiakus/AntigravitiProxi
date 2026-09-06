@@ -1,6 +1,7 @@
 package antigravity
 
 import (
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -117,21 +118,33 @@ func containsString(values []string, want string) bool {
 }
 
 func isAntigravityRoot(p ProcessInfo) bool {
+	if p.PID > 0 && p.PID == os.Getpid() {
+		return false
+	}
 	name := strings.ToLower(strings.TrimSpace(p.Name))
 	exe := strings.ToLower(p.Executable)
 	cmd := strings.ToLower(p.CommandLine)
+	if strings.Contains(name, "antigraviti-pro") || strings.Contains(exe, "antigraviti-pro") {
+		return false
+	}
 	if strings.Contains(name, "antigravity") || strings.Contains(exe, "antigravity") {
 		return true
 	}
 	// Some launchers expose a generic executable name but retain the product
 	// path/argument in the command line.
-	return strings.Contains(cmd, "antigravity") && !strings.Contains(name, "antigraviti-proxi")
+	return strings.Contains(cmd, "antigravity") && !strings.Contains(cmd, "antigraviti-pro")
 }
 
 func classifyAgentProcess(p ProcessInfo) (string, bool) {
+	if p.PID > 0 && p.PID == os.Getpid() {
+		return "control-plane", false
+	}
 	name := strings.ToLower(strings.TrimSpace(p.Name))
 	exe := strings.ToLower(p.Executable)
 	cmd := strings.ToLower(p.CommandLine)
+	if strings.Contains(name, "antigraviti-pro") || strings.Contains(exe, "antigraviti-pro") {
+		return "control-plane", false
+	}
 	joined := name + " " + exe + " " + cmd
 
 	switch {

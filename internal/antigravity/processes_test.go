@@ -30,3 +30,27 @@ func TestBuildAgentProcessTreeDoesNotCaptureUnrelatedNode(t *testing.T) {
 		t.Fatalf("unrelated process captured: %#v", r.Processes)
 	}
 }
+
+func TestBuildAgentProcessTreeDoesNotCaptureSelfOrProxyProcess(t *testing.T) {
+	// Simulated Linux truncated comm "antigraviti-pro" run from a path with "antigravity"
+	all := []ProcessInfo{
+		{
+			PID:         999,
+			PPID:        1,
+			Name:        "antigraviti-pro",
+			Executable:  "/home/user/antigravity-proxy/dist/antigraviti-proxi",
+			CommandLine: "/home/user/antigravity-proxy/dist/antigraviti-proxi --no-browser",
+		},
+		{
+			PID:         1000,
+			PPID:        999,
+			Name:        "sing-box",
+			Executable:  "/home/user/.config/AntigravitiProxi/bin/sing-box",
+			CommandLine: "sing-box run -c ...",
+		},
+	}
+	r := buildAgentProcessTree(all)
+	if len(r.Processes) != 0 {
+		t.Fatalf("proxy control plane captured as Antigravity IDE: %#v", r.Processes)
+	}
+}

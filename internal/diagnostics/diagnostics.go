@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Homiakus/AntigravitiProxi/internal/platform"
@@ -39,25 +40,59 @@ func Collect(ctx context.Context, domains []string) (Snapshot, error) {
 		return Snapshot{}, e
 	}
 	out := Snapshot{Time: time.Now(), Interfaces: ifaces}
-	for _, d := range domains {
-		sys := systemA(ctx, d)
-		cf := dohA(ctx, "cloudflare-dns.com", "1.1.1.1:443", d)
-		gg := dohA(ctx, "dns.google", "8.8.8.8:443", d)
-		sysAAAA := systemAAAA(ctx, d)
-		cfAAAA := dohAAAA(ctx, "cloudflare-dns.com", "1.1.1.1:443", d)
-		ggAAAA := dohAAAA(ctx, "dns.google", "8.8.8.8:443", d)
-		trusted := union(cf, gg)
-		trustedAAAA := union(cfAAAA, ggAAAA)
-		// CDN/anycast providers routinely return different valid addresses to
-		// different resolvers. An IP-set mismatch is therefore not evidence of
-		// DNS tampering. Flag only an answer existing on one side while the
-		// trusted resolvers have no answer at all.
-		suspicious := (len(sys) > 0 && len(trusted) == 0) || (len(sys) == 0 && len(trusted) > 0) ||
-			(len(sysAAAA) > 0 && len(trustedAAAA) == 0) || (len(sysAAAA) == 0 && len(trustedAAAA) > 0)
-		out.DNS = append(out.DNS, DNSComparison{Domain: d, System: sys, Cloudflare: cf, Google: gg, SystemAAAA: sysAAAA, CloudflareAAAA: cfAAAA, GoogleAAAA: ggAAAA, Suspicious: suspicious})
+
+	var (
+		pubIP  string
+		pubGeo string
+		geoWg  sync.WaitGroup
+	)
+	geoWg.Add(1)
+	go func() {
+		defer geoWg.Done()
+		pubIP, pubGeo = publicGeo(ctx)
+	}()
+
+	dnsResults := make([]DNSComparison, len(domains))
+	var wg sync.WaitGroup
+	for i, d := range domains {
+		wg.Add(1)
+		go func(idx int, domain string) {
+			defer wg.Done()
+			var (
+				sys, cf, gg, sysAAAA, cfAAAA, ggAAAA []string
+				dwg                                  sync.WaitGroup
+			)
+			dwg.Add(6)
+			go func() { defer dwg.Done(); sys = systemA(ctx, domain) }()
+			go func() { defer dwg.Done(); cf = dohA(ctx, "cloudflare-dns.com", "1.1.1.1:443", domain) }()
+			go func() { defer dwg.Done(); gg = dohA(ctx, "dns.google", "8.8.8.8:443", domain) }()
+			go func() { defer dwg.Done(); sysAAAA = systemAAAA(ctx, domain) }()
+			go func() { defer dwg.Done(); cfAAAA = dohAAAA(ctx, "cloudflare-dns.com", "1.1.1.1:443", domain) }()
+			go func() { defer dwg.Done(); ggAAAA = dohAAAA(ctx, "dns.google", "8.8.8.8:443", domain) }()
+			dwg.Wait()
+
+			trusted := union(cf, gg)
+			trustedAAAA := union(cfAAAA, ggAAAA)
+			suspicious := (len(sys) > 0 && len(trusted) == 0) || (len(sys) == 0 && len(trusted) > 0) ||
+				(len(sysAAAA) > 0 && len(trustedAAAA) == 0) || (len(sysAAAA) == 0 && len(trustedAAAA) > 0)
+			dnsResults[idx] = DNSComparison{
+				Domain:         domain,
+				System:         sys,
+				Cloudflare:     cf,
+				Google:         gg,
+				SystemAAAA:     sysAAAA,
+				CloudflareAAAA: cfAAAA,
+				GoogleAAAA:     ggAAAA,
+				Suspicious:     suspicious,
+			}
+		}(i, d)
 	}
-	if ip, geo := publicGeo(ctx); ip != "" {
-		out.PublicIP, out.PublicGeo = ip, geo
+	wg.Wait()
+	geoWg.Wait()
+
+	out.DNS = dnsResults
+	if pubIP != "" {
+		out.PublicIP, out.PublicGeo = pubIP, pubGeo
 	}
 	return out, nil
 }

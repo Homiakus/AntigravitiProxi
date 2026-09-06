@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -72,7 +73,11 @@ func New() (*Server, error) {
 		return nil, err
 	}
 	if _, err := antigravity.ExpireHostsOverride(filepath.Join(root, "backups"), time.Now().UTC()); err != nil {
-		return nil, fmt.Errorf("validate emergency hosts override: %w", err)
+		if errors.Is(err, os.ErrPermission) || os.IsPermission(err) {
+			log.Printf("warning: cannot expire emergency hosts override due to permission: %v", err)
+		} else {
+			return nil, fmt.Errorf("validate emergency hosts override: %w", err)
+		}
 	}
 
 	settingsPath := filepath.Join(root, "config.json")
@@ -187,6 +192,10 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !isAllowedHost(r.Host) {
+			http.Error(w, "forbidden: invalid Host header", http.StatusForbidden)
+			return
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
@@ -194,6 +203,18 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+func isAllowedHost(hostHeader string) bool {
+	h := strings.TrimSpace(hostHeader)
+	if h == "" {
+		return false
+	}
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	return isLoopbackHost(h)
+}
+
 
 func (s *Server) requireCSRF(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

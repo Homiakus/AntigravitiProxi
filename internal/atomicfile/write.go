@@ -40,6 +40,23 @@ func Write(path string, data []byte, perm fs.FileMode) error {
 	return nil
 }
 
+// WriteDirect persists a complete file as an atomic transaction in the destination
+// directory without creating a .previous-good backup. This is suitable for system
+// files like /etc/hosts where the caller manages backups in a dedicated user directory.
+func WriteDirect(path string, data []byte, perm fs.FileMode) error {
+	if path == "" {
+		return errors.New("atomicfile: empty path")
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("atomicfile: mkdir %s: %w", dir, err)
+	}
+	if err := writeReplace(path, data, perm); err != nil {
+		return fmt.Errorf("atomicfile: replace %s: %w", path, err)
+	}
+	return nil
+}
+
 func writeReplace(path string, data []byte, perm fs.FileMode) (retErr error) {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)

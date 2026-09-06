@@ -22,6 +22,16 @@ func TestRedactSupportData(t *testing.T) {
 	}
 }
 
+func TestRedactIPEndpoints(t *testing.T) {
+	input := `endpoints: 198.51.100.1:443 10.0.0.2:7890 [2001:db8::1]:8080 192.168.1.0/24 http://192.0.2.1:80/`
+	got := Redact(input)
+	for _, leaked := range []string{"198.51.100.1", "10.0.0.2", "2001:db8::1", "192.168.1.0", "192.0.2.1"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("IP address leaked in %q: %s", leaked, got)
+		}
+	}
+}
+
 func FuzzRedactKnownSecrets(f *testing.F) {
 	f.Add("Bearer abcdefghijklmnop user@example.com /home/alice/file.txt 192.0.2.7")
 	f.Add(`refresh_token="fixture-secret" C:\Users\Alice\token.txt`)

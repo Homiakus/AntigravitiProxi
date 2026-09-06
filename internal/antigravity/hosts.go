@@ -44,7 +44,7 @@ func SetHostsOverride(domain, ip, backupDir string) (string, error) {
 	}
 	raw := removeBlock(string(b))
 	raw = strings.TrimRight(raw, "\r\n") + "\n" + hostsStart + "\n" + ip + "    " + domain + "\n" + hostsEnd + "\n"
-	if e = atomicfile.Write(p, []byte(raw), 0o644); e != nil {
+	if e = atomicfile.WriteDirect(p, []byte(raw), 0o644); e != nil {
 		return "", e
 	}
 	now := time.Now().UTC()
@@ -64,7 +64,7 @@ func RemoveHostsOverride() error {
 	if e != nil {
 		return e
 	}
-	return atomicfile.Write(p, []byte(removeBlock(string(b))), 0o644)
+	return atomicfile.WriteDirect(p, []byte(removeBlock(string(b))), 0o644)
 }
 
 // ExpireHostsOverride removes only the marker-scoped override when its
@@ -94,7 +94,7 @@ func ExpireHostsOverride(backupDir string, now time.Time) (bool, error) {
 	if !hasOwnedHostsLine(string(hosts), metadata) {
 		return false, fmt.Errorf("hosts override ownership cannot be proven")
 	}
-	if err := atomicfile.Write(hostsPath, []byte(removeBlock(string(hosts))), 0o644); err != nil {
+	if err := atomicfile.WriteDirect(hostsPath, []byte(removeBlock(string(hosts))), 0o644); err != nil {
 		return false, err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {

@@ -6,6 +6,16 @@ let assurance = null;
 let diagnostics = null;
 let refreshInFlight = false;
 let assuranceInFlight = false;
+let toastTimer = null;
+
+function showToast(msg, tone='info'){
+  const t = $('#toast');
+  if(!t) return;
+  t.textContent = msg;
+  t.className = 'toast show ' + tone;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>{ t.className = 'toast'; }, 2600);
+}
 
 function pretty(v){ return typeof v === 'string' ? v : JSON.stringify(v,null,2); }
 function setOutput(v){ output.textContent = pretty(v); output.scrollTop = 0; }
@@ -297,15 +307,23 @@ async function action(name){
       setOutput('Готово.');
       return;
     }
+    if(name==='clear-logs'){
+      const ev=$('#events');
+      if(ev) ev.innerHTML='';
+      showToast('События очищены', 'good');
+      return;
+    }
     if(name==='attestation'){
       res=await api('/api/attestation');
       renderAssurance(res);
     }else if(name==='save-config'){
       res=await saveConfigFromUI();
+      showToast('Настройки сохранены', 'good');
       const saveStatus=$('#save-status');
       if(saveStatus){ saveStatus.textContent='Сохранено'; saveStatus.classList.remove('error'); setTimeout(()=>{saveStatus.textContent='';},3000); }
     }else if(name==='diagnostics'){
       res=await refreshDiagnostics(true);
+      showToast('Диагностика обновлена', 'good');
     }else if(name==='agent-doctor'){
       res=await api('/api/agent-doctor');
     }else if(name==='logs'){
@@ -315,6 +333,7 @@ async function action(name){
         .replace('hosts-enable','hosts/enable')
         .replace('hosts-disable','hosts/disable');
       res=await api('/api/actions/'+path,{method:'POST'});
+      showToast(`Команда выполнена: ${name}`, 'good');
     }
 
     setOutput(res);
@@ -322,6 +341,7 @@ async function action(name){
   }catch(e){
     const message=String(e?.message||e||'unknown error');
     setOutput('ERROR\n'+message);
+    showToast(`Ошибка: ${message}`, 'bad');
     const saveStatus=$('#save-status');
     if(name==='save-config' && saveStatus){ saveStatus.textContent='Не сохранено'; saveStatus.classList.add('error'); }
   }finally{
@@ -329,9 +349,44 @@ async function action(name){
   }
 }
 
-document.addEventListener('click',e=>{
+document.addEventListener('click', async e=>{
   const b=e.target.closest('[data-action]');
-  if(b) action(b.dataset.action);
+  if(b) return action(b.dataset.action);
+
+  if(e.target?.id==='copy-proxy-btn'){
+    const url=state?.proxy_url||$('#proxy-url')?.textContent||'http://127.0.0.1:7890';
+    try{
+      await navigator.clipboard.writeText(url);
+      showToast(`Скопировано: ${url}`, 'good');
+    }catch{
+      showToast('Не удалось скопировать URL в буфер', 'bad');
+    }
+    return;
+  }
+
+  if(e.target?.id==='copy-env-btn'){
+    const url=state?.proxy_url||$('#proxy-url')?.textContent||'http://127.0.0.1:7890';
+    const cmd=`export all_proxy=${url} http_proxy=${url} https_proxy=${url}`;
+    try{
+      await navigator.clipboard.writeText(cmd);
+      showToast('export команды скопированы в буфер', 'good');
+    }catch{
+      showToast('Не удалось скопировать команду в буфер', 'bad');
+    }
+    return;
+  }
+
+  const pill=e.target.closest('#log-filters .pill');
+  if(pill){
+    document.querySelectorAll('#log-filters .pill').forEach(p=>p.classList.remove('active'));
+    pill.classList.add('active');
+    const filter=pill.dataset.filter;
+    const ev=$('#events');
+    if(ev){
+      ev.classList.remove('filter-error','filter-warn','filter-info');
+      if(filter && filter!=='all') ev.classList.add('filter-'+filter);
+    }
+  }
 });
 
 document.addEventListener('change',e=>{

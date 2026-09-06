@@ -8,7 +8,36 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
+
+var (
+	windowsNetstatMu    sync.Mutex
+	windowsNetstatCache = map[string]struct {
+		out string
+		at  time.Time
+	}{}
+)
+
+func getWindowsNetstatOutput(proto string) (string, error) {
+	windowsNetstatMu.Lock()
+	defer windowsNetstatMu.Unlock()
+	now := time.Now()
+	if cached, ok := windowsNetstatCache[proto]; ok && now.Sub(cached.at) < 1500*time.Millisecond {
+		return cached.out, nil
+	}
+	out, err := exec.Command("netstat", "-ano", "-p", proto).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("netstat -ano -p %s: %w: %s", proto, err, strings.TrimSpace(string(out)))
+	}
+	s := string(out)
+	windowsNetstatCache[proto] = struct {
+		out string
+		at  time.Time
+	}{out: s, at: now}
+	return s, nil
+}
 
 func platformRuntimeConnectionOwners(source, network string, candidatePIDs []int) ([]int, string, error) {
 	wantIP, wantPort, err := splitWindowsRuntimeSource(source)
@@ -23,11 +52,11 @@ func platformRuntimeConnectionOwners(source, network string, candidatePIDs []int
 			return nil, "", fmt.Errorf("unsupported runtime network %q", network)
 		}
 	}
-	out, err := exec.Command("netstat", "-ano", "-p", proto).CombinedOutput()
+	out, err := getWindowsNetstatOutput(proto)
 	if err != nil {
-		return nil, "", fmt.Errorf("netstat -ano -p %s: %w: %s", proto, err, strings.TrimSpace(string(out)))
+		return nil, "", err
 	}
-	owners, matches := parseWindowsNetstatOwners(string(out), proto, wantIP, wantPort, candidatePIDs)
+	owners, matches := parseWindowsNetstatOwners(out, proto, wantIP, wantPort, candidatePIDs)
 	return owners, fmt.Sprintf("source=%s matched %d netstat row(s) and %d candidate PID(s)", source, matches, len(owners)), nil
 }
 

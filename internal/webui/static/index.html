@@ -30,7 +30,11 @@
             <div class="metric"><span>Antigravity</span><strong id="ag-state">—</strong></div>
             <div class="metric"><span>Платформа</span><strong id="platform-state">—</strong></div>
           </div>
-          <div class="endpoint mono" id="proxy-url">http://127.0.0.1:7890</div>
+          <div class="endpoint-container">
+            <div class="endpoint mono" id="proxy-url">http://127.0.0.1:7890</div>
+            <button class="ghost copy-btn" id="copy-proxy-btn" type="button" title="Скопировать URL">Копировать</button>
+            <button class="ghost copy-btn" id="copy-env-btn" type="button" title="Скопировать export all_proxy=...">export</button>
+          </div>
           <div class="system-summary" id="system-summary" role="status">Проверяю состояние…</div>
         </article>
 
@@ -140,11 +144,27 @@
       </section>
 
       <section class="panel result-panel"><div class="panel-title"><span>Результат последнего действия</span><button class="ghost" data-action="clear-output">Очистить</button></div><pre id="output">Готово.</pre></section>
-      <section class="panel logs-panel"><div class="panel-title"><span>Live events</span><button class="ghost" data-action="logs">sing-box logs</button></div><div id="events" class="events"></div></section>
+      <section class="panel logs-panel">
+        <div class="panel-title">
+          <span>Live events</span>
+          <div class="logs-controls">
+            <div class="filter-pills" id="log-filters" role="tablist" aria-label="Фильтр событий">
+              <button type="button" class="pill active" data-filter="all">Все</button>
+              <button type="button" class="pill" data-filter="error">Ошибки</button>
+              <button type="button" class="pill" data-filter="warn">Предупреждения</button>
+              <button type="button" class="pill" data-filter="info">Инфо</button>
+            </div>
+            <button class="ghost" data-action="clear-logs" title="Очистить список событий">Очистить</button>
+            <button class="ghost" data-action="logs">sing-box logs</button>
+          </div>
+        </div>
+        <div id="events" class="events"></div>
+      </section>
     </main>
 
     <footer>Control plane слушает только loopback. Пароли не читаются приложением. Системный HTTP proxy по умолчанию не изменяется.</footer>
   </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/app.js" defer></script>
 </body>
 </html>

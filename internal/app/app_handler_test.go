@@ -50,3 +50,26 @@ func TestStaticAssetsRemainDirectlyReachable(t *testing.T) {
 		})
 	}
 }
+
+func TestSecurityHeadersRejectsInvalidHost(t *testing.T) {
+	s := &Server{csrf: "test-token"}
+
+	// Rebinding attack attempt with an external hostname
+	badReq := httptest.NewRequest(http.MethodGet, "http://attacker.example.com:48765/", nil)
+	badRR := httptest.NewRecorder()
+	s.Handler().ServeHTTP(badRR, badReq)
+	if badRR.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for external Host, got %d", badRR.Code)
+	}
+
+	// Valid loopback hosts must succeed
+	for _, validHost := range []string{"127.0.0.1:48765", "localhost:48765", "[::1]:48765", "127.0.0.1"} {
+		req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:48765/", nil)
+		req.Host = validHost
+		rr := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for valid host %q, got %d", validHost, rr.Code)
+		}
+	}
+}

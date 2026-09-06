@@ -24,7 +24,7 @@ func TestNetworkAttestationEndpointIsReadOnlyAndReturnsIdleEvidence(t *testing.T
 		csrf:   "test-csrf",
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/attestation", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:48765/api/attestation", nil)
 	rr := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
@@ -49,7 +49,7 @@ func TestNetworkAttestationEndpointIsReadOnlyAndReturnsIdleEvidence(t *testing.T
 
 	// Read-only evidence does not require the mutation CSRF token, while a
 	// method change must not accidentally hit the GET handler.
-	post := httptest.NewRequest(http.MethodPost, "/api/attestation", nil)
+	post := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:48765/api/attestation", nil)
 	postRR := httptest.NewRecorder()
 	s.Handler().ServeHTTP(postRR, post)
 	if postRR.Code != http.StatusMethodNotAllowed {
