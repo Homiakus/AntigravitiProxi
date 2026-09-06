@@ -34,9 +34,10 @@
 - **A-02 — implementation slice complete:** добавлен persisted `proxy_auto_start`, миграция старых конфигураций с включённым значением, auto-start control plane с ограниченным retry и явное отключение при Stop. Live-проверка после перезапуска службы подтверждена; crash/reboot acceptance ещё открыта.
 - **A-04 — in progress:** start/stop/close/config операции сериализованы общей lifecycle lock. Нужны concurrent acceptance tests и rollback предыдущей рабочей конфигурации.
 - **A-06 — implementation slice complete:** удалена недостижимая старая TUN-ветка `renderSetup` и связанный UI-код подготовки маршрута; обычный экран явно описывает loopback proxy без TUN и системных proxy-настроек. Полный пересмотр оставшихся legacy-подсказок и adapters ещё открыт.
+- **A-11 — implementation slice complete:** `sing-box version` кэшируется на 30 секунд, а UI не допускает перекрывающиеся status/attestation polling-запросы. Диагностика DNS по-прежнему запускается только при открытии/ручном обновлении.
 - **A-08 — first slice complete:** актуальный UI contract test и полный `go test ./...` проходят; documentation consistency также проходит. Полная API negative matrix ещё не добавлена.
 
-Verified on this revision: `go test ./...`, `go vet ./internal/app ./internal/proxy ./internal/webui ./internal/consistency`, `git diff --check`; live API/listener/HTTPS proxy check passed with auto-start enabled. Runtime service/reboot acceptance is still open.
+Verified on this revision: `go test ./...`, `go vet ./internal/app ./internal/proxy ./internal/webui ./internal/consistency`, `git diff --check`; live API/listener/HTTPS proxy check passed after restart with auto-start enabled. Runtime service/reboot acceptance is still open.
 
 | ID / приоритет | Дефект и свидетельство в коде | Исправление и критерий готовности |
 |---|---|---|

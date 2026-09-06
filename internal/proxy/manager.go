@@ -46,12 +46,16 @@ type Config struct {
 
 type Manager struct {
 	mu                      sync.Mutex
+	versionMu               sync.Mutex
 	cfg                     Config
 	cmd                     *exec.Cmd
 	hardCmd                 *exec.Cmd
 	logger                  Logger
 	mode                    Mode
 	proxyReadinessConfirmed bool
+	versionPath             string
+	versionValue            string
+	versionAt               time.Time
 }
 
 type release struct {
@@ -202,7 +206,17 @@ func versionContains(versionOutput, want string) bool {
 }
 
 func (m *Manager) Version(ctx context.Context) string {
-	return binaryVersion(ctx, m.Find())
+	path := m.Find()
+	m.versionMu.Lock()
+	defer m.versionMu.Unlock()
+	if path == m.versionPath && time.Since(m.versionAt) < 30*time.Second {
+		return m.versionValue
+	}
+	value := binaryVersion(ctx, path)
+	m.versionPath = path
+	m.versionValue = value
+	m.versionAt = time.Now()
+	return value
 }
 
 // Install guarantees that the managed sing-box binary matches the configured

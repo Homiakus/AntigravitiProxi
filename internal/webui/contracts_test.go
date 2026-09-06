@@ -82,6 +82,8 @@ func TestOneClickTunnelSetupIsVisibleAndWired(t *testing.T) {
 		`TUN и системные proxy-настройки не изменяются.`,
 		`async function refreshDiagnostics`,
 		`api('/api/diagnostics')`,
+		`let refreshInFlight = false`,
+		`let assuranceInFlight = false`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Fatalf("app.js is missing one-click setup contract marker %q", want)

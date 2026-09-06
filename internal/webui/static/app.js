@@ -4,6 +4,8 @@ const output = $('#output');
 let state = null;
 let assurance = null;
 let diagnostics = null;
+let refreshInFlight = false;
+let assuranceInFlight = false;
 
 function pretty(v){ return typeof v === 'string' ? v : JSON.stringify(v,null,2); }
 function setOutput(v){ output.textContent = pretty(v); output.scrollTop = 0; }
@@ -137,6 +139,9 @@ function renderSetup(){
 }
 
 async function refresh(){
+  if(refreshInFlight) return;
+  refreshInFlight=true;
+  try{
   state=await api('/api/status');
   setMetric('#proxy-state',state.proxy_running?'ЗАПУЩЕН':'ВЫКЛЮЧЕН',state.proxy_running?'good':'');
 
@@ -187,6 +192,9 @@ async function refresh(){
   if(fallback) fallback.checked=!!state.settings.tunnel_domain_fallback;
   renderSetup();
   renderPolicy();
+  }finally{
+    refreshInFlight=false;
+  }
 }
 
 function assuranceColor(v){
@@ -250,6 +258,8 @@ function renderAssurance(v){
 }
 
 async function refreshAssurance(){
+  if(assuranceInFlight) return;
+  assuranceInFlight=true;
   try{
     renderAssurance(await api('/api/attestation'));
   }catch(e){
@@ -259,6 +269,8 @@ async function refreshAssurance(){
       stateEl.style.color='var(--bad)';
       $('#assurance-detail').textContent=e.message;
     }
+  }finally{
+    assuranceInFlight=false;
   }
 }
 
