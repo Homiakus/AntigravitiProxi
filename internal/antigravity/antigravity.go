@@ -119,6 +119,7 @@ func FindExecutable() string {
 		candidates = []string{
 			"/usr/bin/antigravity",
 			"/usr/bin/antigravity-ide",
+			"/snap/antigravity-ide-snap/current/usr/share/antigravity-ide/antigravity-ide",
 			"/usr/local/bin/antigravity",
 			"/usr/local/bin/antigravity-ide",
 			"/opt/Antigravity/antigravity",
